@@ -269,20 +269,20 @@ private:
   void
   build_ib_particle_handler(
     Particles::ParticleHandler<dim, dim> &particle_handler,
-    DEM::dem_data_structures<dim>::particle_index_iterator_map
+    typename DEM::dem_data_structures<dim>::particle_index_iterator_map
                                        &particle_container,
     std::unordered_set<unsigned int>   &local_particle_ids) const;
 
   void
   build_contact_containers(
-    const DEM::dem_data_structures<dim>::particle_index_iterator_map
+    const typename DEM::dem_data_structures<dim>::particle_index_iterator_map
                                       &particle_container,
     const std::unordered_set<unsigned int> &local_particle_ids,
-    DEM::dem_data_structures<dim>::adjacent_particle_pairs
+    typename DEM::dem_data_structures<dim>::adjacent_particle_pairs
       &local_adjacent_particles,
-    DEM::dem_data_structures<dim>::adjacent_particle_pairs
+    typename DEM::dem_data_structures<dim>::adjacent_particle_pairs
                           &ghost_adjacent_particles,
-    DEM::dem_data_structures<dim>::particle_wall_in_contact
+    typename DEM::dem_data_structures<dim>::particle_wall_in_contact
                           &particle_wall_in_contact) const;
 
   void
