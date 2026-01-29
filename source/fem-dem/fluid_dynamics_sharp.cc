@@ -3107,7 +3107,7 @@ template <int dim>
 void
 FluidDynamicsSharp<dim>::build_ib_particle_handler(
   Particles::ParticleHandler<dim, dim> &particle_handler,
-  DEM::dem_data_structures<dim>::particle_index_iterator_map
+  typename DEM::dem_data_structures<dim>::particle_index_iterator_map
                                      &particle_container,
   std::unordered_set<unsigned int>   &local_particle_ids) const
 {
@@ -3152,14 +3152,14 @@ FluidDynamicsSharp<dim>::build_ib_particle_handler(
 template <int dim>
 void
 FluidDynamicsSharp<dim>::build_contact_containers(
-  const DEM::dem_data_structures<dim>::particle_index_iterator_map
+  const typename DEM::dem_data_structures<dim>::particle_index_iterator_map
                                     &particle_container,
   const std::unordered_set<unsigned int> &local_particle_ids,
-  DEM::dem_data_structures<dim>::adjacent_particle_pairs
+  typename DEM::dem_data_structures<dim>::adjacent_particle_pairs
     &local_adjacent_particles,
-  DEM::dem_data_structures<dim>::adjacent_particle_pairs
+  typename DEM::dem_data_structures<dim>::adjacent_particle_pairs
                         &ghost_adjacent_particles,
-  DEM::dem_data_structures<dim>::particle_wall_in_contact
+  typename DEM::dem_data_structures<dim>::particle_wall_in_contact
                         &particle_wall_in_contact) const
 {
   local_adjacent_particles.clear();
@@ -3254,16 +3254,19 @@ FluidDynamicsSharp<dim>::handle_dem_particle_output_and_postprocessing()
     *this->triangulation,
     *this->mapping,
     DEM::CFDDEMProperties::PropertiesIndex::n_properties);
-  DEM::dem_data_structures<dim>::particle_index_iterator_map particle_container;
+  typename DEM::dem_data_structures<dim>::particle_index_iterator_map
+    particle_container;
   std::unordered_set<unsigned int> local_particle_ids;
 
   build_ib_particle_handler(particle_handler,
                             particle_container,
                             local_particle_ids);
 
-  DEM::dem_data_structures<dim>::adjacent_particle_pairs local_adjacent_particles;
-  DEM::dem_data_structures<dim>::adjacent_particle_pairs ghost_adjacent_particles;
-  DEM::dem_data_structures<dim>::particle_wall_in_contact
+  typename DEM::dem_data_structures<dim>::adjacent_particle_pairs
+    local_adjacent_particles;
+  typename DEM::dem_data_structures<dim>::adjacent_particle_pairs
+    ghost_adjacent_particles;
+  typename DEM::dem_data_structures<dim>::particle_wall_in_contact
     particle_wall_in_contact;
 
   if (write_force_chains || log_particle_wall_collisions)
