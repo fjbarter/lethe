@@ -55,7 +55,7 @@ public:
   inline unsigned int
   get_number_properties()
   {
-    return DEM::CFDDEMProperties::PropertiesIndex::n_properties;
+    return DEM::CFDDEMProperties::PropertiesIndex::n_properties + 3;
   }
 
   /**

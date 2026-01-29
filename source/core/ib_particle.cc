@@ -116,14 +116,23 @@ template <int dim>
 std::vector<std::pair<std::string, int>>
 IBParticle<dim>::get_properties_name()
 {
-  std::vector<std::pair<std::string, int>> particle_properties(
-    DEM::CFDDEMProperties::PropertiesIndex::n_properties);
-  particle_properties =
+  std::vector<std::pair<std::string, int>> particle_properties =
     DEM::ParticleProperties<dim, DEM::CFDDEMProperties::PropertiesIndex>::
       get_properties_name();
+  particle_properties.resize(
+    DEM::CFDDEMProperties::PropertiesIndex::n_properties + 3);
 
   // Rename particle type to id to match IB pattern
   particle_properties[DEM::CFDDEMProperties::type] = std::make_pair("id", 1);
+
+  const unsigned int orientation_index_base =
+    DEM::CFDDEMProperties::PropertiesIndex::n_properties;
+  particle_properties[orientation_index_base + 0] =
+    std::make_pair("orientation", 3);
+  particle_properties[orientation_index_base + 1] =
+    std::make_pair("orientation", 1);
+  particle_properties[orientation_index_base + 2] =
+    std::make_pair("orientation", 1);
 
   return particle_properties;
 }
@@ -168,6 +177,12 @@ IBParticle<dim>::get_properties()
         [DEM::CFDDEMProperties::PropertiesIndex::fem_force_two_way_coupling_z] =
           fluid_forces[2];
     }
+
+  const unsigned int orientation_index_base =
+    DEM::CFDDEMProperties::PropertiesIndex::n_properties;
+  properties[orientation_index_base + 0] = orientation[0];
+  properties[orientation_index_base + 1] = orientation[1];
+  properties[orientation_index_base + 2] = orientation[2];
 
   return properties;
 }
