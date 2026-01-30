@@ -15,6 +15,7 @@
 #include <dem/log_collision_data.h>
 #include <dem/set_particle_particle_contact_force_model.h>
 #include <dem/visualization.h>
+#include <dem/periodic_boundaries_manipulator.h>
 
 #include <solvers/fluid_dynamics_matrix_based.h>
 
@@ -69,6 +70,24 @@ public:
 
 
 private:
+  /**
+   * @brief Synchronize DEM periodic BCs with CFD boundary conditions.
+   */
+  void
+  sync_dem_periodic_to_cfd_boundary_conditions();
+
+  /**
+   * @brief Cache periodic boundary data for IB particles and contact logic.
+   */
+  void
+  update_periodic_ib_data();
+
+  /**
+   * @brief Wrap a particle across periodic boundaries if needed.
+   */
+  bool
+  wrap_particle_if_needed(IBParticle<dim> &particle) const;
+
   /**
    * @brief Assemble the local matrix for a given cell.
    *
@@ -601,6 +620,15 @@ private:
 
   // Bool that check if some particle are coupled.
   bool some_particles_are_coupled;
+
+  bool         periodic_ib_enabled   = false;
+  unsigned int periodic_ib_direction = 0;
+  double       periodic_ib_length    = 0.0;
+  Tensor<1, 3> periodic_ib_offset    = Tensor<1, 3>();
+  Point<dim>   periodic_ib_point_0;
+  Point<dim>   periodic_ib_point_1;
+  Tensor<1, dim> periodic_ib_normal_0;
+  Tensor<1, dim> periodic_ib_normal_1;
 
   std::map<unsigned int,
            std::set<typename DoFHandler<dim>::active_cell_iterator>>

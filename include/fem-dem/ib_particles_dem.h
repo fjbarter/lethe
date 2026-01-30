@@ -90,6 +90,15 @@ public:
              const MPI_Comm                     &mpi_communicator_input,
              const std::vector<IBParticle<dim>> &particles);
 
+  /**
+   * @brief Set periodic boundary information for minimum-image contact handling.
+   */
+  void
+  set_periodic_boundary_information(const bool        enabled,
+                                    const unsigned int direction,
+                                    const double       length,
+                                    const Tensor<1, 3> &offset);
+
 
   /**
    * @brief
@@ -266,6 +275,13 @@ public:
   }
 
 private:
+  /**
+   * @brief Compute periodic shift (minimum image) from particle one to two.
+   */
+  Tensor<1, 3>
+  compute_periodic_shift(const Point<dim> &particle_one_position,
+                         const Point<dim> &particle_two_position) const;
+
   bool
   is_boundary_excluded(const unsigned int boundary_id) const;
 
@@ -334,11 +350,18 @@ private:
   // Particles contact history
   std::map<unsigned int, std::map<unsigned int, ContactInfo>> pp_contact_map;
   std::map<unsigned int, std::map<unsigned int, ContactInfo>> pw_contact_map;
+  std::map<unsigned int, std::map<unsigned int, Tensor<1, 3>>>
+    pp_contact_periodic_shift;
 
   // A vector of vectors of candidate cells for each of the particle.
   std::vector<std::map<unsigned int, BoundaryCellsInfo>> boundary_cells;
 
   double cfd_time;
+
+  bool         periodic_boundaries_enabled = false;
+  unsigned int periodic_direction          = 0;
+  double       periodic_length             = 0.0;
+  Tensor<1, 3> periodic_offset             = Tensor<1, 3>();
 };
 
 

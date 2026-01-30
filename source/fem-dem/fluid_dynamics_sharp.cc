@@ -30,6 +30,9 @@
 
 #include <deal.II/lac/full_matrix.h>
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
 #include <numbers>
 
 // Constructor for class FluidDynamicsSharp
@@ -442,6 +445,8 @@ FluidDynamicsSharp<dim>::refinement_control(const bool initial_refinement)
             *this->dof_handler, particles[p_i].mesh_based_precalculations);
         }
     }
+
+  update_periodic_ib_data();
 }
 
 template <int dim>
@@ -2332,6 +2337,7 @@ FluidDynamicsSharp<dim>::integrate_particles()
                 }
               // Check if the particle is in the domain. Throw an error if it's
               // the case.
+              bool particle_outside_domain = false;
               try
                 {
                   const auto &cell =
@@ -2340,6 +2346,28 @@ FluidDynamicsSharp<dim>::integrate_particles()
                   (void)cell;
                 }
               catch (...)
+                {
+                  particle_outside_domain = true;
+                }
+
+              if (particle_outside_domain && periodic_ib_enabled)
+                {
+                  wrap_particle_if_needed(particles[p]);
+                  try
+                    {
+                      const auto &cell =
+                        LetheGridTools::find_cell_around_point_with_tree(
+                          *this->dof_handler, particles[p].position);
+                      (void)cell;
+                      particle_outside_domain = false;
+                    }
+                  catch (...)
+                    {
+                      particle_outside_domain = true;
+                    }
+                }
+
+              if (particle_outside_domain)
                 {
                   this->pcout
                     << "particle " << p
@@ -2590,6 +2618,18 @@ FluidDynamicsSharp<dim>::integrate_particles()
             }
         }
 
+      if (periodic_ib_enabled)
+        {
+          bool any_wrapped = false;
+          for (unsigned int p = 0; p < particles.size(); ++p)
+            {
+              if (wrap_particle_if_needed(particles[p]))
+                any_wrapped = true;
+            }
+          if (any_wrapped)
+            clear_combined_shape_cache = true;
+        }
+
       if (clear_combined_shape_cache)
         combined_shapes->clear_cache();
 
@@ -2665,6 +2705,17 @@ FluidDynamicsSharp<dim>::integrate_particles()
 
           particles[p].set_position(particles[p].position);
           particles[p].set_orientation(particles[p].orientation);
+        }
+      if (periodic_ib_enabled)
+        {
+          bool any_wrapped = false;
+          for (unsigned int p = 0; p < particles.size(); ++p)
+            {
+              if (wrap_particle_if_needed(particles[p]))
+                any_wrapped = true;
+            }
+          if (any_wrapped && combined_shapes)
+            combined_shapes->clear_cache();
         }
       particle_residual = 0;
     }
@@ -5087,8 +5138,156 @@ FluidDynamicsSharp<dim>::update_precalculations_for_ib()
 
 template <int dim>
 void
+FluidDynamicsSharp<dim>::sync_dem_periodic_to_cfd_boundary_conditions()
+{
+  const auto &dem_bc = cfd_dem_parameters.dem_parameters.boundary_conditions;
+  const bool  dem_has_periodic =
+    std::find(dem_bc.bc_types.begin(),
+              dem_bc.bc_types.end(),
+              Parameters::Lagrangian::BCDEM::BoundaryType::periodic) !=
+    dem_bc.bc_types.end();
+
+  if (!dem_has_periodic)
+    return;
+
+  auto &cfd_bc = this->simulation_parameters.boundary_conditions;
+  const auto id0 = dem_bc.periodic_boundary_0;
+  const auto id1 = dem_bc.periodic_boundary_1;
+  const auto dir = static_cast<unsigned int>(dem_bc.periodic_direction);
+
+  cfd_bc.type[id0] = BoundaryConditions::BoundaryType::periodic;
+  cfd_bc.type[id1] = BoundaryConditions::BoundaryType::periodic_neighbor;
+  cfd_bc.periodic_neighbor_id[id0] = id1;
+  cfd_bc.periodic_direction[id0]   = dir;
+}
+
+template <int dim>
+void
+FluidDynamicsSharp<dim>::update_periodic_ib_data()
+{
+  periodic_ib_enabled   = false;
+  periodic_ib_length    = 0.0;
+  periodic_ib_offset    = Tensor<1, 3>();
+  periodic_ib_direction = 0;
+
+  const auto &dem_bc = cfd_dem_parameters.dem_parameters.boundary_conditions;
+  const bool  dem_has_periodic =
+    std::find(dem_bc.bc_types.begin(),
+              dem_bc.bc_types.end(),
+              Parameters::Lagrangian::BCDEM::BoundaryType::periodic) !=
+    dem_bc.bc_types.end();
+
+  if (!dem_has_periodic)
+    {
+      ib_dem.set_periodic_boundary_information(false, 0, 0.0, Tensor<1, 3>());
+      return;
+    }
+
+  PeriodicBoundariesManipulator<dim> periodic_manipulator;
+  periodic_manipulator.set_periodic_boundaries_information(
+    dem_bc.periodic_boundary_0,
+    static_cast<unsigned int>(dem_bc.periodic_direction));
+
+  typename DEM::dem_data_structures<dim>::periodic_boundaries_cells_info
+    periodic_cells_information;
+  periodic_manipulator.map_periodic_cells(*this->triangulation,
+                                          periodic_cells_information);
+
+  periodic_ib_direction =
+    static_cast<unsigned int>(dem_bc.periodic_direction);
+
+  const Tensor<1, 3> local_offset =
+    periodic_manipulator.get_periodic_offset_distance();
+  const double local_offset_dir = local_offset[periodic_ib_direction];
+  const double max_offset_dir =
+    Utilities::MPI::max(local_offset_dir, this->mpi_communicator);
+  const double min_offset_dir =
+    Utilities::MPI::min(local_offset_dir, this->mpi_communicator);
+  const double chosen_offset_dir =
+    (std::abs(max_offset_dir) >= std::abs(min_offset_dir)) ? max_offset_dir :
+                                                             min_offset_dir;
+
+  periodic_ib_offset = Tensor<1, 3>();
+  periodic_ib_offset[periodic_ib_direction] = chosen_offset_dir;
+  periodic_ib_length = std::abs(chosen_offset_dir);
+
+  double local_min = std::numeric_limits<double>::max();
+  double local_max = -std::numeric_limits<double>::max();
+  if (!periodic_cells_information.empty())
+    {
+      const auto &periodic_info = periodic_cells_information.begin()->second;
+      const double coord_0 = periodic_info.point_on_face[periodic_ib_direction];
+      const double coord_1 =
+        periodic_info.point_on_periodic_face[periodic_ib_direction];
+      local_min = std::min(coord_0, coord_1);
+      local_max = std::max(coord_0, coord_1);
+    }
+
+  const double global_min =
+    Utilities::MPI::min(local_min, this->mpi_communicator);
+  const double global_max =
+    Utilities::MPI::max(local_max, this->mpi_communicator);
+
+  periodic_ib_point_0 = Point<dim>();
+  periodic_ib_point_1 = Point<dim>();
+  periodic_ib_point_0[periodic_ib_direction] = global_min;
+  periodic_ib_point_1[periodic_ib_direction] = global_max;
+
+  periodic_ib_normal_0 = Tensor<1, dim>();
+  periodic_ib_normal_1 = Tensor<1, dim>();
+  periodic_ib_normal_0[periodic_ib_direction] = -1.0;
+  periodic_ib_normal_1[periodic_ib_direction] = 1.0;
+
+  periodic_ib_enabled = periodic_ib_length > 0.0;
+
+  ib_dem.set_periodic_boundary_information(periodic_ib_enabled,
+                                           periodic_ib_direction,
+                                           periodic_ib_length,
+                                           periodic_ib_offset);
+}
+
+template <int dim>
+bool
+FluidDynamicsSharp<dim>::wrap_particle_if_needed(IBParticle<dim> &particle) const
+{
+  if (!periodic_ib_enabled)
+    return false;
+
+  bool moved = false;
+  Tensor<1, dim> vector_to_face_0 = particle.position - periodic_ib_point_0;
+  double distance_with_face_0 =
+    scalar_product(vector_to_face_0, periodic_ib_normal_0);
+  if (distance_with_face_0 >= 0.0)
+    {
+      particle.position[periodic_ib_direction] +=
+        periodic_ib_offset[periodic_ib_direction];
+      moved = true;
+    }
+
+  Tensor<1, dim> vector_to_face_1 = particle.position - periodic_ib_point_1;
+  double distance_with_face_1 =
+    scalar_product(vector_to_face_1, periodic_ib_normal_1);
+  if (distance_with_face_1 >= 0.0)
+    {
+      particle.position[periodic_ib_direction] -=
+        periodic_ib_offset[periodic_ib_direction];
+      moved = true;
+    }
+
+  if (moved)
+    {
+      particle.set_position(particle.position);
+      particle.clear_shape_cache();
+    }
+
+  return moved;
+}
+
+template <int dim>
+void
 FluidDynamicsSharp<dim>::solve()
 {
+  sync_dem_periodic_to_cfd_boundary_conditions();
   read_mesh_and_manifolds(
     *this->triangulation,
     this->simulation_parameters.mesh,
@@ -5097,6 +5296,7 @@ FluidDynamicsSharp<dim>::solve()
     this->simulation_parameters.boundary_conditions);
 
   define_particles();
+  update_periodic_ib_data();
   this->setup_dofs();
 
   if (this->simulation_parameters.restart_parameters.restart == false)

@@ -9,6 +9,7 @@
 #include <deal.II/fe/fe_values.h>
 
 #include <algorithm>
+#include <cmath>
 
 template <int dim>
 void
@@ -29,6 +30,42 @@ IBParticlesDEM<dim>::initialize(
   boundary_cells.resize(dem_particles.size());
 
   std::vector<types::boundary_id> boundary_index(0);
+}
+
+template <int dim>
+void
+IBParticlesDEM<dim>::set_periodic_boundary_information(
+  const bool        enabled,
+  const unsigned int direction,
+  const double       length,
+  const Tensor<1, 3> &offset)
+{
+  periodic_boundaries_enabled = enabled;
+  periodic_direction          = direction;
+  periodic_length             = length;
+  periodic_offset             = offset;
+}
+
+template <int dim>
+Tensor<1, 3>
+IBParticlesDEM<dim>::compute_periodic_shift(
+  const Point<dim> &particle_one_position,
+  const Point<dim> &particle_two_position) const
+{
+  Tensor<1, 3> shift;
+  if (!periodic_boundaries_enabled || periodic_length <= 0.0)
+    return shift;
+
+  const double delta =
+    particle_two_position[periodic_direction] -
+    particle_one_position[periodic_direction];
+  const double half_length = 0.5 * periodic_length;
+  if (std::abs(delta) > half_length)
+    {
+      shift[periodic_direction] =
+        (delta > 0.0) ? periodic_length : -periodic_length;
+    }
+  return shift;
 }
 
 template <int dim>
@@ -135,8 +172,22 @@ IBParticlesDEM<dim>::update_contact_candidates()
               const Point<dim> particle_two_location = particle_two.position;
               double           distance =
                 (particle_one_location - particle_two_location).norm();
-              if (typeid(*particle_one.shape) == typeid(Sphere<dim>) &&
-                  typeid(*particle_two.shape) == typeid(Sphere<dim>))
+              if (periodic_boundaries_enabled)
+                {
+                  const Tensor<1, 3> periodic_shift =
+                    compute_periodic_shift(particle_one_location,
+                                           particle_two_location);
+                  if (periodic_shift[periodic_direction] != 0.0)
+                    {
+                      Point<dim> particle_two_shifted = particle_two_location;
+                      particle_two_shifted[periodic_direction] -=
+                        periodic_shift[periodic_direction];
+                      distance =
+                        (particle_one_location - particle_two_shifted).norm();
+                    }
+                }
+              else if (typeid(*particle_one.shape) == typeid(Sphere<dim>) &&
+                       typeid(*particle_two.shape) == typeid(Sphere<dim>))
                 {
                   distance =
                     (particle_one_location - particle_two_location).norm();
@@ -227,19 +278,47 @@ IBParticlesDEM<dim>::calculate_pp_contact_force(
               Tensor<1, dim>          normal;
               std::vector<Point<dim>> contact_points_candidate;
 
-              auto iterator =
-                previous_wall_contact_point[particle_one.particle_id].find(
-                  particle_two.particle_id);
-              if (iterator !=
-                  previous_wall_contact_point[particle_one.particle_id].end())
+              const Tensor<1, 3> periodic_shift =
+                compute_periodic_shift(particle_one.position,
+                                       particle_two.position);
+              Point<dim> particle_two_position_shifted = particle_two.position;
+              if (periodic_boundaries_enabled &&
+                  periodic_shift[periodic_direction] != 0.0)
                 {
-                  contact_points_candidate.push_back(iterator->second);
+                  particle_two_position_shifted[periodic_direction] -=
+                    periodic_shift[periodic_direction];
+                }
+
+              auto iterator =
+                previous_particle_particle_contact_point[particle_one
+                                                           .particle_id]
+                  .find(particle_two.particle_id);
+              if (iterator !=
+                  previous_particle_particle_contact_point[particle_one
+                                                             .particle_id]
+                    .end())
+                {
+                  bool shift_matches = true;
+                  if (periodic_boundaries_enabled)
+                    {
+                      const auto shift_it =
+                        pp_contact_periodic_shift[particle_one.particle_id]
+                          .find(particle_two.particle_id);
+                      shift_matches =
+                        (shift_it !=
+                         pp_contact_periodic_shift[particle_one.particle_id]
+                           .end()) &&
+                        (shift_it->second[periodic_direction] ==
+                         periodic_shift[periodic_direction]);
+                    }
+                  if (shift_matches)
+                    contact_points_candidate.push_back(iterator->second);
                 }
               else
                 {
                   contact_points_candidate.push_back(
                     particle_one.position +
-                    (particle_two.position - particle_one.position) *
+                    (particle_two_position_shifted - particle_one.position) *
                       (particle_one.radius /
                        (particle_one.radius + particle_two.radius)));
                 }
@@ -247,24 +326,60 @@ IBParticlesDEM<dim>::calculate_pp_contact_force(
               if (typeid(*particle_one.shape) == typeid(Sphere<dim>) &&
                   typeid(*particle_two.shape) == typeid(Sphere<dim>))
                 {
+                  const Point<dim> original_particle_two_position =
+                    particle_two.shape->get_position();
+                  if (periodic_boundaries_enabled &&
+                      periodic_shift[periodic_direction] != 0.0)
+                    {
+                      particle_two.shape->set_position(
+                        particle_two_position_shifted);
+                    }
                   auto contact_state = particle_one.shape->distance_to_shape(
                     *particle_two.shape, contact_points_candidate);
                   normal_overlap = -std::get<double>(contact_state);
                   contact_point  = std::get<Point<dim>>(contact_state);
                   normal         = std::get<Tensor<1, dim>>(contact_state);
+                  if (periodic_boundaries_enabled &&
+                      periodic_shift[periodic_direction] != 0.0)
+                    {
+                      particle_two.shape->set_position(
+                        original_particle_two_position);
+                    }
                 }
               else if (typeid(*particle_one.shape) == typeid(Sphere<dim>) &&
                        typeid(*particle_two.shape) != typeid(Sphere<dim>))
                 {
+                  const Point<dim> original_particle_two_position =
+                    particle_two.shape->get_position();
+                  if (periodic_boundaries_enabled &&
+                      periodic_shift[periodic_direction] != 0.0)
+                    {
+                      particle_two.shape->set_position(
+                        particle_two_position_shifted);
+                    }
                   auto contact_state = particle_one.shape->distance_to_shape(
                     *particle_two.shape, contact_points_candidate);
                   normal_overlap = -std::get<double>(contact_state);
                   contact_point  = std::get<Point<dim>>(contact_state);
                   normal         = std::get<Tensor<1, dim>>(contact_state);
+                  if (periodic_boundaries_enabled &&
+                      periodic_shift[periodic_direction] != 0.0)
+                    {
+                      particle_two.shape->set_position(
+                        original_particle_two_position);
+                    }
                 }
               else if (typeid(*particle_one.shape) != typeid(Sphere<dim>) &&
                        typeid(*particle_two.shape) == typeid(Sphere<dim>))
                 {
+                  const Point<dim> original_particle_two_position =
+                    particle_two.shape->get_position();
+                  if (periodic_boundaries_enabled &&
+                      periodic_shift[periodic_direction] != 0.0)
+                    {
+                      particle_two.shape->set_position(
+                        particle_two_position_shifted);
+                    }
                   auto contact_state = particle_two.shape->distance_to_shape(
                     *particle_one.shape, contact_points_candidate);
                   normal_overlap = -std::get<double>(contact_state);
@@ -272,18 +387,38 @@ IBParticlesDEM<dim>::calculate_pp_contact_force(
                   normal         = -std::get<Tensor<1, dim>>(
                     contact_state); // Flip the normal since it returns the
                                             // normal using the second particle;
+                  if (periodic_boundaries_enabled &&
+                      periodic_shift[periodic_direction] != 0.0)
+                    {
+                      particle_two.shape->set_position(
+                        original_particle_two_position);
+                    }
                 }
               else
                 {
+                  const Point<dim> original_particle_two_position =
+                    particle_two.shape->get_position();
+                  if (periodic_boundaries_enabled &&
+                      periodic_shift[periodic_direction] != 0.0)
+                    {
+                      particle_two.shape->set_position(
+                        particle_two_position_shifted);
+                    }
                   auto contact_state = particle_one.shape->distance_to_shape(
                     *particle_two.shape, contact_points_candidate);
                   normal_overlap = -std::get<double>(contact_state);
                   contact_point  = std::get<Point<dim>>(contact_state);
                   normal         = std::get<Tensor<1, dim>>(contact_state);
+                  if (periodic_boundaries_enabled &&
+                      periodic_shift[periodic_direction] != 0.0)
+                    {
+                      particle_two.shape->set_position(
+                        original_particle_two_position);
+                    }
                 }
-              previous_wall_contact_point[particle_one.particle_id]
-                                         [particle_two.particle_id] =
-                                           contact_point;
+              previous_particle_particle_contact_point[particle_one.particle_id]
+                                                     [particle_two.particle_id] =
+                                                       contact_point;
               Point<3>     contact_point_3d = point_nd_to_3d(contact_point);
               Tensor<1, 3> contact_normal   = tensor_nd_to_3d(normal);
 
@@ -357,7 +492,7 @@ IBParticlesDEM<dim>::calculate_pp_contact_force(
                                         particle_one_velocity_3d,
                                         particle_one.omega,
                                         particle_one_properties,
-                                        particle_two.position,
+                                        particle_two_position_shifted,
                                         particle_two_velocity_3d,
                                         particle_two.omega,
                                         particle_two_properties,
@@ -378,8 +513,16 @@ IBParticlesDEM<dim>::calculate_pp_contact_force(
                     contact_torque[particle_two.particle_id] -
                     particle_two_tangential_torque - rolling_resistance_torque +
                     cross_product_3d((contact_point_3d -
-                                      point_nd_to_3d(particle_two.position)),
+                                      point_nd_to_3d(
+                                        particle_two_position_shifted)),
                                      (normal_force + tangential_force));
+
+                  if (periodic_boundaries_enabled)
+                    {
+                      pp_contact_periodic_shift[particle_one.particle_id]
+                                               [particle_two.particle_id] =
+                        periodic_shift;
+                    }
                 }
 
               else
@@ -391,6 +534,8 @@ IBParticlesDEM<dim>::calculate_pp_contact_force(
                       contact_info.rolling_resistance_spring_torque[d] = 0.;
                     }
                   pp_contact_map[particle_one.particle_id].erase(
+                    particle_two.particle_id);
+                  pp_contact_periodic_shift[particle_one.particle_id].erase(
                     particle_two.particle_id);
                 }
             }
