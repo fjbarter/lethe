@@ -5190,15 +5190,20 @@ FluidDynamicsSharp<dim>::update_periodic_ib_data()
 
   typename DEM::dem_data_structures<dim>::periodic_boundaries_cells_info
     periodic_cells_information;
-  periodic_manipulator.map_periodic_cells(*this->triangulation,
+  const auto *parallel_tria =
+    dynamic_cast<const parallel::distributed::Triangulation<dim, dim> *>(
+      this->triangulation.get());
+  AssertThrow(parallel_tria != nullptr,
+              ExcMessage("Periodic IB requires a parallel::distributed::Triangulation."));
+  periodic_manipulator.map_periodic_cells(*parallel_tria,
                                           periodic_cells_information);
 
   periodic_ib_direction =
     static_cast<unsigned int>(dem_bc.periodic_direction);
 
-  const Tensor<1, 3> local_offset =
+  const Tensor<1, dim> local_offset_dim =
     periodic_manipulator.get_periodic_offset_distance();
-  const double local_offset_dir = local_offset[periodic_ib_direction];
+  const double local_offset_dir = local_offset_dim[periodic_ib_direction];
   const double max_offset_dir =
     Utilities::MPI::max(local_offset_dir, this->mpi_communicator);
   const double min_offset_dir =
