@@ -2627,7 +2627,17 @@ FluidDynamicsSharp<dim>::integrate_particles()
                 any_wrapped = true;
             }
           if (any_wrapped)
-            clear_combined_shape_cache = true;
+            {
+              clear_combined_shape_cache = true;
+              // Remap cut cells and precalculations to the wrapped position
+              // to avoid using stale geometry for IB forcing.
+              vertices_cell_mapping();
+              update_precalculations_for_ib();
+              if (all_spheres)
+                optimized_generate_cut_cells_map();
+              else
+                generate_cut_cells_map();
+            }
         }
 
       if (clear_combined_shape_cache)
@@ -2714,8 +2724,18 @@ FluidDynamicsSharp<dim>::integrate_particles()
               if (wrap_particle_if_needed(particles[p]))
                 any_wrapped = true;
             }
-          if (any_wrapped && combined_shapes)
-            combined_shapes->clear_cache();
+          if (any_wrapped)
+            {
+              if (combined_shapes)
+                combined_shapes->clear_cache();
+              // Remap cut cells and precalculations after wrapping.
+              vertices_cell_mapping();
+              update_precalculations_for_ib();
+              if (all_spheres)
+                optimized_generate_cut_cells_map();
+              else
+                generate_cut_cells_map();
+            }
         }
       particle_residual = 0;
     }
