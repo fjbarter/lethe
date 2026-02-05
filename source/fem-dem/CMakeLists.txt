@@ -10,6 +10,7 @@ add_library(lethe-fem-dem
   ib_particles_dem.cc
   particle_projector.cc
   postprocessing_cfd_dem.cc
+  sharp_ib_periodic_boundaries.cc
   vans_assemblers.cc
   # Headers
   ../../include/fem-dem/cfd_dem_coupling.h
@@ -22,6 +23,7 @@ add_library(lethe-fem-dem
   ../../include/fem-dem/ib_particles_dem.h
   ../../include/fem-dem/particle_projector.h
   ../../include/fem-dem/postprocessing_cfd_dem.h
+  ../../include/fem-dem/sharp_ib_periodic_boundaries.h
   ../../include/fem-dem/vans_assemblers.h)
 
 deal_ii_setup_target(lethe-fem-dem)
