@@ -18,8 +18,6 @@
 
 #include <solvers/isothermal_compressible_navier_stokes_cls_assembler.h>
 #include <solvers/navier_stokes_cls_assemblers.h>
-#include <solvers/isothermal_compressible_navier_stokes_vof_assembler.h>
-#include <solvers/navier_stokes_vof_assemblers.h>
 #include <solvers/postprocessing_cfd.h>
 
 #include <fem-dem/fluid_dynamics_sharp.h>
@@ -638,16 +636,18 @@ FluidDynamicsSharp<dim>::optimized_generate_cut_cells_map()
           bool         empty    = true;
           unsigned int lvl_iter = 0;
 
-          // Fix max level search
-          unsigned int max_lvl_search =
-            this->dof_handler->get_triangulation().n_levels() - 2;
-          if (max_lvl_search < 4)
-            max_lvl_search =
-              this->dof_handler->get_triangulation().n_levels();
+          // Bound the level search with the globally valid number of levels:
+          // DoFHandler::cell_iterators_on_level() expects a global level
+          // index, which can be smaller than a rank-local n_levels() on a
+          // distributed triangulation.
+          const unsigned int n_global_levels =
+            this->dof_handler->get_triangulation().n_global_levels();
+          const unsigned int max_lvl_search =
+            (n_global_levels > 4 ? n_global_levels - 2 : n_global_levels);
 
           // Search for candidates until at least one is found or until the
           // max_lvl_search is reached
-          while (empty || lvl_iter < max_lvl_search)
+          while (empty && lvl_iter < max_lvl_search)
             {
               const auto &cell_iterator =
                 this->dof_handler->cell_iterators_on_level(lvl_iter);
@@ -3773,6 +3773,7 @@ FluidDynamicsSharp<dim>::sharp_edge()
               this->system_matrix.add(inside_index, inside_index, sum_line);
               this->system_rhs(inside_index) =
                 0 - this->evaluation_point(inside_index) * sum_line;
+
             }
         }
     }

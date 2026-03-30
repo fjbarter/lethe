@@ -747,6 +747,7 @@ private:
   // Cache for domain bounds in periodic direction (used for wrapping)
   double periodic_domain_lower;
   double periodic_domain_upper;
+
 };
 
 

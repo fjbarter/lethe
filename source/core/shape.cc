@@ -1870,7 +1870,7 @@ RBFShape<dim>::update_precalculations(DoFHandler<dim> &updated_dof_handler,
 
   this->dof_handler = &updated_dof_handler;
   const unsigned int maximal_level =
-    updated_dof_handler.get_triangulation().n_levels();
+    updated_dof_handler.get_triangulation().n_global_levels();
 
   // We start by dividing the list of RBF nodes into manageable portions
   number_of_nodes = std::get<2>(iterable_nodes[0])->size();

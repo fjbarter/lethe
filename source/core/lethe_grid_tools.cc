@@ -151,14 +151,14 @@ LetheGridTools::find_cell_around_point_with_tree(
   MappingQ1<dim>                          mapping;
   typename DoFHandler<dim>::cell_iterator best_cell_iter;
 
-  bool         cell_found_on_level_search = false;
-  unsigned int lvl                        = 0;
-  unsigned int max_lvl_search = dof_handler.get_triangulation().n_levels() - 2;
+  bool               cell_found_on_level_search = false;
+  unsigned int       lvl                        = 0;
+  const unsigned int n_global_levels =
+    dof_handler.get_triangulation().n_global_levels();
+  const unsigned int max_lvl_search =
+    (n_global_levels > 4 ? n_global_levels - 2 : n_global_levels);
 
-  if (max_lvl_search < 4)
-    max_lvl_search = dof_handler.get_triangulation().n_levels();
-
-  while (lvl < max_lvl_search)
+  while (lvl < max_lvl_search && !cell_found_on_level_search)
     {
       const auto &cell_iterator = dof_handler.cell_iterators_on_level(lvl);
 

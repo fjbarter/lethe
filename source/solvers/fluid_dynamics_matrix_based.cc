@@ -30,8 +30,6 @@
 
 #include <deal.II/numerics/vector_tools.h>
 
-
-
 // Constructor for class FluidDynamicsMatrixBased
 template <int dim>
 FluidDynamicsMatrixBased<dim>::FluidDynamicsMatrixBased(
