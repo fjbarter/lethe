@@ -1047,9 +1047,10 @@ FluidDynamicsSharp<dim>::mesh_adapt_ib(const bool initial_refinement)
               if (sharp_ib_periodic_boundaries.is_periodic_enabled())
                 {
                   // Compute refinement support radius
-                  double refinement_radius = particles[p].radius *
-                                             this->simulation_parameters
-                                               .particlesParameters->outside_radius;
+                  double refinement_radius =
+                    particles[p].radius *
+                    this->simulation_parameters.particlesParameters
+                      ->refinement_outside_distance_factor;
                   if (minimal_crown_refinement_enabled)
                     {
                       double factor        = 1.0 / sqrt(dim);
