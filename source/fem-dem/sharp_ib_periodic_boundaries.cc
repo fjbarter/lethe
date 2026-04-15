@@ -48,7 +48,7 @@ void
 SharpIBPeriodicBoundaries<dim>::set_periodic_offset(
   const dealii::Tensor<1, dim> &offset)
 {
-  periodic_offset           = offset;
+  periodic_offset = offset;
 }
 
 template <int dim>
@@ -58,9 +58,9 @@ SharpIBPeriodicBoundaries<dim>::parse_dem_periodic_configuration(
 {
   PeriodicConfiguration parsed_configuration;
 
-  const unsigned int periodic_boundary_count = std::ranges::count(
-    dem_boundary_conditions.bc_types,
-    Parameters::Lagrangian::BCDEM::BoundaryType::periodic);
+  const unsigned int periodic_boundary_count =
+    std::ranges::count(dem_boundary_conditions.bc_types,
+                       Parameters::Lagrangian::BCDEM::BoundaryType::periodic);
 
   AssertThrow(
     periodic_boundary_count <= 1,
@@ -71,13 +71,10 @@ SharpIBPeriodicBoundaries<dim>::parse_dem_periodic_configuration(
   if (periodic_boundary_count == 0)
     return parsed_configuration;
 
-  parsed_configuration.enabled   = true;
-  parsed_configuration.boundary_0 =
-    dem_boundary_conditions.periodic_boundary_0;
-  parsed_configuration.boundary_1 =
-    dem_boundary_conditions.periodic_boundary_1;
-  parsed_configuration.direction =
-    dem_boundary_conditions.periodic_direction;
+  parsed_configuration.enabled    = true;
+  parsed_configuration.boundary_0 = dem_boundary_conditions.periodic_boundary_0;
+  parsed_configuration.boundary_1 = dem_boundary_conditions.periodic_boundary_1;
+  parsed_configuration.direction  = dem_boundary_conditions.periodic_direction;
 
   return parsed_configuration;
 }
@@ -109,7 +106,7 @@ SharpIBPeriodicBoundaries<dim>::parse_cfd_periodic_configuration(
 
   const auto boundary_id = periodic_boundary_ids.front();
 
-  parsed_configuration.enabled   = true;
+  parsed_configuration.enabled    = true;
   parsed_configuration.boundary_0 = boundary_id;
   parsed_configuration.boundary_1 =
     cfd_boundary_conditions.periodic_neighbor_id.at(boundary_id);
@@ -138,26 +135,25 @@ SharpIBPeriodicBoundaries<dim>::validate_matching_configurations(
   if (dem_configuration.enabled)
     {
       error_message << ", pair=(" << dem_configuration.boundary_0 << ", "
-                    << dem_configuration.boundary_1 << "), direction="
-                    << dem_configuration.direction;
+                    << dem_configuration.boundary_1
+                    << "), direction=" << dem_configuration.direction;
     }
 
   error_message << "\nCFD periodic: enabled=" << cfd_configuration.enabled;
   if (cfd_configuration.enabled)
     {
       error_message << ", pair=(" << cfd_configuration.boundary_0 << ", "
-                    << cfd_configuration.boundary_1 << "), direction="
-                    << cfd_configuration.direction;
+                    << cfd_configuration.boundary_1
+                    << "), direction=" << cfd_configuration.direction;
     }
 
   AssertThrow(dem_configuration.enabled == cfd_configuration.enabled,
               dealii::ExcMessage(error_message.str()));
 
-  AssertThrow(
-    dem_configuration.boundary_0 == cfd_configuration.boundary_0 &&
-      dem_configuration.boundary_1 == cfd_configuration.boundary_1 &&
-      dem_configuration.direction == cfd_configuration.direction,
-    dealii::ExcMessage(error_message.str()));
+  AssertThrow(dem_configuration.boundary_0 == cfd_configuration.boundary_0 &&
+                dem_configuration.boundary_1 == cfd_configuration.boundary_1 &&
+                dem_configuration.direction == cfd_configuration.direction,
+              dealii::ExcMessage(error_message.str()));
 }
 
 template <int dim>
@@ -168,8 +164,7 @@ SharpIBPeriodicBoundaries<dim>::report_configuration(
   if (!configuration.enabled)
     return;
 
-  pcout << "Sharp IB periodic boundaries configured successfully."
-        << std::endl;
+  pcout << "Sharp IB periodic boundaries configured successfully." << std::endl;
   pcout << "  Periodic direction: " << configuration.direction << std::endl;
   pcout << "  Periodic boundary IDs: " << configuration.boundary_0 << ", "
         << configuration.boundary_1 << std::endl;

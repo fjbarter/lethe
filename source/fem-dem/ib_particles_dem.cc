@@ -493,7 +493,7 @@ IBParticlesDEM<dim>::update_particles_boundary_contact(
   const Quadrature<dim - 1>    &face_quadrature_formula,
   const Mapping<dim>           &mapping)
 {
-  const FESystem<dim, dim>                          fe = dof_handler.get_fe();
+  const FESystem<dim, dim> fe = dof_handler.get_fe();
   for (unsigned int p_i = 0; p_i < particles.size(); ++p_i)
     {
       // Clear the last boundary cell candidates.
@@ -550,22 +550,23 @@ IBParticlesDEM<dim>::update_particles_boundary_contact(
                         continue;
                       const double level_set = particles[p_i].get_levelset(
                         boundary_information.point_on_boundary);
-                      auto       iterator = local_boundary_candidates.find(
+                      auto iterator = local_boundary_candidates.find(
                         boundary_information.boundary_index);
 
                       if (iterator == local_boundary_candidates.end() ||
                           level_set < iterator->second.second)
                         local_boundary_candidates[boundary_information
-                                                   .boundary_index] =
-                          {boundary_information, level_set};
+                                                    .boundary_index] = {
+                          boundary_information, level_set};
                     }
                 }
             }
         }
 
       // Regroup the information of all processors.
-      const auto global_boundary_candidates = Utilities::MPI::all_gather(
-        this->mpi_communicator, local_boundary_candidates);
+      const auto global_boundary_candidates =
+        Utilities::MPI::all_gather(this->mpi_communicator,
+                                   local_boundary_candidates);
 
       boundary_cells[p_i].clear();
       std::map<unsigned int, double> global_best_levelset;
@@ -573,9 +574,9 @@ IBParticlesDEM<dim>::update_particles_boundary_contact(
         {
           for (const auto &[boundary_id, candidate] : rank_candidates)
             {
-              const auto  &candidate_info    = candidate.first;
+              const auto  &candidate_info     = candidate.first;
               const double candidate_levelset = candidate.second;
-              const auto current_best_level =
+              const auto   current_best_level =
                 global_best_levelset.find(boundary_id);
 
               bool accept_candidate = false;

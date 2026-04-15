@@ -62,7 +62,7 @@ public:
   assemble_system_rhs() override
   {
     assemble_rhs();
-    sharp_edge();
+    sharp_edge(true);
   }
 
 protected:
@@ -204,7 +204,7 @@ private:
       }
     this->FluidDynamicsMatrixBased<dim>::assemble_system_matrix();
 
-    sharp_edge();
+    sharp_edge(false);
   }
 
 
@@ -259,9 +259,13 @@ private:
    * Galerkin sharp-interface immersed boundary method and its application to
    * incompressible flow problems,» Computers & Fluids, 2020, in press, ref.
    * CAF-D-20-00773
+   *
+   * @param assemble_rhs_terms If true, overwrite the Sharp-IB RHS entries in
+   * addition to the matrix rows. Matrix assembly paths should pass false so
+   * they do not touch a stale residual vector.
    */
   void
-  sharp_edge();
+  sharp_edge(const bool assemble_rhs_terms);
 
   /**
    * @brief
@@ -573,6 +577,24 @@ Return a bool that describes  if a cell contains a specific point
   }
 
   /**
+   * @brief Sharp may keep the outer nonlinear iteration active because of the
+   * particle-coupling residual even when the assembled fluid residual is
+   * already below tolerance.
+   *
+   * In that situation, the inner fluid linear solve is unnecessary and may be
+   * skipped while the outer coupled iteration continues.
+   *
+   * @return `true` because Sharp allows skipping the inner fluid linear solve
+   * once the assembled fluid residual is already below the nonlinear
+   * tolerance.
+   */
+  bool
+  allow_skip_linear_solve_when_residual_is_below_tolerance() const override
+  {
+    return true;
+  }
+
+  /**
    * @brief
    *This function updates the precalculations for every immersed particle
    */
@@ -710,10 +732,9 @@ Return a bool that describes  if a cell contains a specific point
    * @param periodic_shift Shift of the periodic frame that cut the cell.
    */
   void
-  register_cutting_particle_frame(
-    CutCellInfo           &cut_cell_info,
-    const unsigned int     particle_id,
-    const Tensor<1, dim> &periodic_shift);
+  register_cutting_particle_frame(CutCellInfo          &cut_cell_info,
+                                  const unsigned int    particle_id,
+                                  const Tensor<1, dim> &periodic_shift);
 
   /**
    * @brief Recover the stored periodic frame for a particle that cuts a cell.
@@ -805,35 +826,35 @@ Return a bool that describes  if a cell contains a specific point
 private:
   struct ParticlePeriodicFrame
   {
-    unsigned int    particle_id = 0;
+    unsigned int   particle_id = 0;
     Tensor<1, dim> periodic_shift;
   };
 
   struct CutCellInfo
   {
-    bool                              is_cut = false;
-    unsigned int                      primary_particle_id = 0;
+    bool                               is_cut              = false;
+    unsigned int                       primary_particle_id = 0;
     std::vector<ParticlePeriodicFrame> cutting_particle_frames;
   };
 
   struct OverconstrainedFluidCellInfo
   {
-    bool           is_overconstrained = false;
-    unsigned int   particle_id = 0;
+    bool           is_overconstrained  = false;
+    unsigned int   particle_id         = 0;
     double         distance_to_surface = 0.0;
     Tensor<1, dim> periodic_shift;
   };
 
   struct InsideCellInfo
   {
-    bool           is_inside = false;
+    bool           is_inside   = false;
     unsigned int   particle_id = 0;
     Tensor<1, dim> periodic_shift;
   };
 
   struct PeriodicFrameDofCacheKey
   {
-    types::global_dof_index dof_index = 0;
+    types::global_dof_index dof_index   = 0;
     unsigned int            particle_id = numbers::invalid_unsigned_int;
     int                     periodic_frame_index = 0;
 

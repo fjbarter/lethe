@@ -58,9 +58,9 @@ public:
    */
   void
   initialize(
-    const Parameters::Lagrangian::BCDEM            &dem_boundary_conditions,
-    const BoundaryConditions::BoundaryConditions   &cfd_boundary_conditions,
-    const dealii::ConditionalOStream               &pcout);
+    const Parameters::Lagrangian::BCDEM          &dem_boundary_conditions,
+    const BoundaryConditions::BoundaryConditions &cfd_boundary_conditions,
+    const dealii::ConditionalOStream             &pcout);
 
   /**
    * @brief Set the periodic offset after triangulation setup.
@@ -181,8 +181,8 @@ private:
    * @return Parsed CFD periodic configuration.
    */
   PeriodicConfiguration
-  parse_cfd_periodic_configuration(
-    const BoundaryConditions::BoundaryConditions &cfd_boundary_conditions) const;
+  parse_cfd_periodic_configuration(const BoundaryConditions::BoundaryConditions
+                                     &cfd_boundary_conditions) const;
 
   /**
    * @brief Validate that the DEM and CFD periodic configurations are both
@@ -205,7 +205,7 @@ private:
   report_configuration(const dealii::ConditionalOStream &pcout) const;
 
   // Validated periodic configuration.
-  PeriodicConfiguration  configuration;
+  PeriodicConfiguration configuration;
 
   // Periodic offset vector: the displacement from the lower periodic face to
   // the upper periodic face along the periodic direction. Applied as a
