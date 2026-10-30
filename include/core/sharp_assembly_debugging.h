@@ -33,6 +33,11 @@ namespace SharpAssemblyDebugging
     neighbor_cells,
     cache_hits,
     cache_misses,
+    index_build,
+    index_query,
+    index_candidates,
+    geometry_cache_hits,
+    geometry_cache_misses,
     metric_count
   };
   struct Measurements
@@ -165,7 +170,12 @@ namespace SharpAssemblyDebugging
          "child_cells_examined",
          "neighbor_cells_examined",
          "stencil_cache_hits",
-         "stencil_cache_misses"}};
+         "stencil_cache_misses",
+         "spatial_index_build",
+         "spatial_index_query",
+         "spatial_index_candidates",
+         "geometry_cache_hits",
+         "geometry_cache_misses"}};
       std::ostringstream out;
       out << "[SHARP-ASSEMBLY-DEBUGGING] END assembly=" << assembly_number
           << " ranks=" << static_cast<unsigned int>(ranks)

@@ -70,6 +70,9 @@ FluidDynamicsSharp<dim>::vertices_cell_mapping()
   TimerOutput::Scope t(this->computing_timer, "Map vertices to cell");
 
   LetheGridTools::vertices_cell_mapping(*this->dof_handler, vertices_to_cell);
+  // Bound the exact-query cache to one timestep and refresh mesh iterators.
+  if (sharp_ib_periodic_boundaries.is_periodic_enabled())
+    periodic_stencil_search.reinit(*this->dof_handler);
 }
 
 template <int dim>
@@ -1509,61 +1512,33 @@ FluidDynamicsSharp<dim>::force_on_ib()
                                               support_points
                                                 [local_face_dof_indices[i]],
                                               cell);
-                                          try
+                                          if (sharp_ib_periodic_boundaries
+                                                .is_periodic_enabled())
                                             {
-                                              cell_2 = LetheGridTools::
-                                                find_cell_around_point_with_neighbors<
-                                                  dim>(
-                                                  *this->dof_handler,
-                                                  vertices_to_cell,
+                                              cell_2 =
+                                                find_periodic_stencil_cell(
                                                   cell,
                                                   point_to_find_cell,
-                                                  sharp_ib_periodic_boundaries
-                                                    .is_periodic_enabled());
-                                            }
-                                          catch (...)
-                                            {
-                                              // Try periodic wrapping
-                                              bool found = false;
-                                              if (sharp_ib_periodic_boundaries
-                                                    .is_periodic_enabled())
-                                                {
-                                                  Point<dim> wrapped_point =
-                                                    sharp_ib_periodic_boundaries
-                                                      .wrap_point(
-                                                        point_to_find_cell,
-                                                        periodic_domain_lower,
-                                                        periodic_domain_upper);
-                                                  if (wrapped_point !=
-                                                      point_to_find_cell)
-                                                    {
-                                                      try
-                                                        {
-                                                          cell_2 = LetheGridTools::
-                                                            find_cell_around_point_with_tree(
-                                                              *this
-                                                                 ->dof_handler,
-                                                              wrapped_point,
-                                                              sharp_ib_periodic_boundaries
-                                                                .is_periodic_enabled());
-                                                          force_periodic_shift =
-                                                            wrapped_point -
-                                                            point_to_find_cell;
-                                                          found = true;
-                                                        }
-                                                      catch (
-                                                        const std::runtime_error
-                                                          &)
-                                                        {
-                                                          AssertThrow(
-                                                            false,
-                                                            ExcMessage(
-                                                              "Periodic force stencil is unavailable on this rank."));
-                                                        }
-                                                    }
-                                                }
-                                              if (!found)
+                                                  force_periodic_shift);
+                                              if (cell_2 ==
+                                                  this->dof_handler->end())
                                                 cell_2 = cell;
+                                            }
+                                          else
+                                            {
+                                              try
+                                                {
+                                                  cell_2 = LetheGridTools::
+                                                    find_cell_around_point_with_neighbors<
+                                                      dim>(*this->dof_handler,
+                                                           vertices_to_cell,
+                                                           cell,
+                                                           point_to_find_cell);
+                                                }
+                                              catch (...)
+                                                {
+                                                  cell_2 = cell;
+                                                }
                                             }
                                           if (sharp_ib_periodic_boundaries
                                                 .is_periodic_enabled())
@@ -4223,76 +4198,38 @@ FluidDynamicsSharp<dim>::sharp_edge()
                           bool           particle_close_to_wall = false;
                           Tensor<1, dim> stencil_periodic_shift;
                           (void)particle_close_to_wall;
-                          try
+                          if (sharp_ib_periodic_boundaries
+                                .is_periodic_enabled())
+                            stencil_cell = find_periodic_stencil_cell(
+                              cell_cut,
+                              point_to_find_cell,
+                              stencil_periodic_shift);
+                          else
                             {
-                              stencil_cell = LetheGridTools::
-                                find_cell_around_point_with_neighbors<dim>(
-                                  *this->dof_handler,
-                                  vertices_to_cell,
-                                  cell_cut,
-                                  point_to_find_cell,
-                                  sharp_ib_periodic_boundaries
-                                    .is_periodic_enabled());
+                              try
+                                {
+                                  stencil_cell = LetheGridTools::
+                                    find_cell_around_point_with_neighbors<dim>(
+                                      *this->dof_handler,
+                                      vertices_to_cell,
+                                      cell_cut,
+                                      point_to_find_cell);
+                                }
+                              catch (...)
+                                {
+                                  stencil_cell = this->dof_handler->end();
+                                }
                             }
-                          catch (...)
+                          if (stencil_cell == this->dof_handler->end())
                             {
-                              // Cell search failed. If periodic boundaries
-                              // are enabled, the stencil point may have
-                              // crossed the periodic boundary. Wrap the point
-                              // and retry the search.
-                              bool found_periodic = false;
-                              if (sharp_ib_periodic_boundaries
-                                    .is_periodic_enabled())
-                                {
-                                  Point<dim> wrapped_point =
-                                    sharp_ib_periodic_boundaries.wrap_point(
-                                      point_to_find_cell,
-                                      periodic_domain_lower,
-                                      periodic_domain_upper);
-                                  if (wrapped_point != point_to_find_cell)
-                                    {
-                                      // SHARP-ASSEMBLY-DEBUGGING-TOP
-                                      SharpAssemblyDebugging::Scope debug_retry(
-                                        SharpAssemblyDebugging::periodic_retry);
-                                      // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
-                                      try
-                                        {
-                                          stencil_cell = LetheGridTools::
-                                            find_cell_around_point_with_tree(
-                                              *this->dof_handler,
-                                              wrapped_point,
-                                              sharp_ib_periodic_boundaries
-                                                .is_periodic_enabled());
-                                          found_periodic = true;
-                                          // Store the shift so interpolation
-                                          // points can be wrapped to the
-                                          // stencil cell's coordinate frame
-                                          stencil_periodic_shift =
-                                            wrapped_point - point_to_find_cell;
-                                        }
-                                      catch (const std::runtime_error &)
-                                        {
-                                          AssertThrow(
-                                            false,
-                                            ExcMessage(
-                                              "Periodic Sharp stencil is unavailable on this rank."));
-                                        }
-                                    }
-                                }
-
-                              if (!found_periodic)
-                                {
-                                  // Genuine wall boundary fallback
-                                  particle_close_to_wall = true;
-                                  stencil_cell           = cell_cut;
-                                  if (this->zero_constraints.is_constrained(
-                                        global_index_overwrite) ||
-                                      this->nonzero_constraints.is_constrained(
-                                        global_index_overwrite))
-                                    {
-                                      continue;
-                                    }
-                                }
+                              // Preserve the nonperiodic wall fallback.
+                              particle_close_to_wall = true;
+                              stencil_cell           = cell_cut;
+                              if (this->zero_constraints.is_constrained(
+                                    global_index_overwrite) ||
+                                  this->nonzero_constraints.is_constrained(
+                                    global_index_overwrite))
+                                continue;
                             }
 
                           stencil_cell->get_dof_indices(local_dof_indices_2);
@@ -4631,8 +4568,9 @@ FluidDynamicsSharp<dim>::sharp_edge()
                                 {
                                   // The DOF is dummy
                                   // SHARP-ASSEMBLY-DEBUGGING-TOP
-                                  SharpAssemblyDebugging::Scope debug_matrix_46327(
-                                    SharpAssemblyDebugging::matrix_add);
+                                  SharpAssemblyDebugging::Scope
+                                    debug_matrix_46327(
+                                      SharpAssemblyDebugging::matrix_add);
                                   // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
                                   this->system_matrix.add(
                                     global_index_overwrite,
@@ -5792,6 +5730,8 @@ template <int dim>
 void
 FluidDynamicsSharp<dim>::setup_dofs_fd()
 {
+  // DoF redistribution also invalidates cached cells without a mesh change.
+  periodic_stencil_search.reinit(*this->dof_handler);
   // Call the base class to do all standard setup (DoF distribution,
   // constraints, vector reinit, sparsity pattern, matrix reinit).
   FluidDynamicsMatrixBased<dim>::setup_dofs_fd();
@@ -5878,6 +5818,26 @@ FluidDynamicsSharp<dim>::initialize_sharp_ib_periodic_configuration()
       "Force-chain output is not supported for periodic Sharp-IB particles."));
 }
 
+
+template <int dim>
+typename DoFHandler<dim>::active_cell_iterator
+FluidDynamicsSharp<dim>::find_periodic_stencil_cell(
+  const typename DoFHandler<dim>::active_cell_iterator &seed,
+  const Point<dim>                                     &point,
+  Tensor<1, dim>                                       &shift)
+{
+  const Point<dim> wrapped =
+    sharp_ib_periodic_boundaries.wrap_point(point,
+                                            periodic_domain_lower,
+                                            periodic_domain_upper);
+  shift = wrapped - point;
+  const auto cell =
+    periodic_stencil_search.find(wrapped, seed, vertices_to_cell);
+  AssertThrow(cell != this->dof_handler->end() || wrapped == point,
+              ExcMessage(
+                "Periodic Sharp stencil is unavailable on this rank."));
+  return cell;
+}
 
 template <int dim>
 void
