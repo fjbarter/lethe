@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 The Lethe Authors
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception OR LGPL-2.1-or-later
 
+// SHARP-ASSEMBLY-DEBUGGING-TOP
+#include <core/sharp_assembly_debugging.h>
+// SHARP-ASSEMBLY-DEBUGGING-BOTTOM
 #include <core/lethe_grid_tools.h>
 #include <core/serial_solid.h>
 #include <core/tensors_and_points_dimension_manipulation.h>
@@ -148,6 +151,9 @@ LetheGridTools::find_cell_around_point_with_tree(
   const Point<dim>      &point,
   const bool             use_global_levels)
 {
+  // SHARP-ASSEMBLY-DEBUGGING-TOP
+  SharpAssemblyDebugging::Scope debug_search(SharpAssemblyDebugging::tree);
+  // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
   // Define temporary variables to store search parameters and intermediate
   // results
   MappingQ1<dim>                          mapping;
@@ -179,6 +185,9 @@ LetheGridTools::find_cell_around_point_with_tree(
       // Loop on the cells on current level of the mesh
       for (const auto &cell : cell_iterator)
         {
+          // SHARP-ASSEMBLY-DEBUGGING-TOP
+          SharpAssemblyDebugging::count(SharpAssemblyDebugging::level_cells);
+          // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
           try
             {
               const Point<dim, double> p_cell =
@@ -218,6 +227,9 @@ LetheGridTools::find_cell_around_point_with_tree(
           unsigned int best_index = 0;
           for (unsigned int i = 0; i < max_childs; ++i)
             {
+              // SHARP-ASSEMBLY-DEBUGGING-TOP
+              SharpAssemblyDebugging::count(SharpAssemblyDebugging::child_cells);
+              // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
               try
                 {
                   const Point<dim, double> p_cell =
@@ -359,6 +371,9 @@ LetheGridTools::find_cell_around_point_with_neighbors(
   const Point<dim>                                     &point,
   const bool                                            use_global_levels)
 {
+  // SHARP-ASSEMBLY-DEBUGGING-TOP
+  SharpAssemblyDebugging::Scope debug_search(SharpAssemblyDebugging::neighbors);
+  // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
   // Find the cells that share a vertex with the original cell.
   std::vector<typename DoFHandler<dim>::active_cell_iterator>
     active_neighbors_set =
@@ -366,6 +381,9 @@ LetheGridTools::find_cell_around_point_with_neighbors(
   // Loop over that group of cells
   for (unsigned int i = 0; i < active_neighbors_set.size(); ++i)
     {
+      // SHARP-ASSEMBLY-DEBUGGING-TOP
+      SharpAssemblyDebugging::count(SharpAssemblyDebugging::neighbor_cells);
+      // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
       if (active_neighbors_set[i]->point_inside(point))
         {
           return active_neighbors_set[i];

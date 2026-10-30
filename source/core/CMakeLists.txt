@@ -101,6 +101,9 @@ add_library(lethe-core
   ../../include/core/sdirk_stage_data.h
   ../../include/core/serial_solid.h
   ../../include/core/shape.h
+  # SHARP-ASSEMBLY-DEBUGGING-TOP
+  ../../include/core/sharp_assembly_debugging.h
+  # SHARP-ASSEMBLY-DEBUGGING-BOTTOM
   ../../include/core/shape_parsing.h
   ../../include/core/simulation_control.h
   ../../include/core/solid_base.h

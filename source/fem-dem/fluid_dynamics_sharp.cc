@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2020-2026 The Lethe Authors
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception OR LGPL-2.1-or-later
 
+// SHARP-ASSEMBLY-DEBUGGING-TOP
+#include <core/sharp_assembly_debugging.h>
+// SHARP-ASSEMBLY-DEBUGGING-BOTTOM
 #include <core/bdf.h>
 #include <core/grids.h>
 #include <core/lethe_grid_tools.h>
@@ -3707,6 +3710,12 @@ template <int dim>
 void
 FluidDynamicsSharp<dim>::sharp_edge()
 {
+  // SHARP-ASSEMBLY-DEBUGGING-TOP
+  SharpAssemblyDebugging::Assembly debug_assembly(
+    this->mpi_communicator,
+    this->simulation_control->get_iteration_number(),
+    this->simulation_control->get_current_time());
+  // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
   // This function defines an Immersed Boundary based on the sharp edge method
   // on a solid of dim=2 or dim=3
 
@@ -3834,8 +3843,22 @@ FluidDynamicsSharp<dim>::sharp_edge()
               if (this->locally_owned_dofs.is_element(index))
                 {
                   const double scale = std::pow(dr, dim) / dt;
+                  // SHARP-ASSEMBLY-DEBUGGING-TOP
+                  SharpAssemblyDebugging::Scope debug_matrix_6713(
+                    SharpAssemblyDebugging::clear_row);
+                  // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
                   this->system_matrix.clear_row(index);
+                  // SHARP-ASSEMBLY-DEBUGGING-TOP
+                  debug_matrix_6713.finish();
+                  // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
+                  // SHARP-ASSEMBLY-DEBUGGING-TOP
+                  SharpAssemblyDebugging::Scope debug_matrix_6769(
+                    SharpAssemblyDebugging::matrix_add);
+                  // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
                   this->system_matrix.add(index, index, scale);
+                  // SHARP-ASSEMBLY-DEBUGGING-TOP
+                  debug_matrix_6769.finish();
+                  // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
                   this->system_rhs(index) =
                     -this->evaluation_point(index) * scale;
                 }
@@ -3883,7 +3906,14 @@ FluidDynamicsSharp<dim>::sharp_edge()
                       break;
                     }
                 }
+              // SHARP-ASSEMBLY-DEBUGGING-TOP
+              SharpAssemblyDebugging::Scope debug_matrix_8759(
+                SharpAssemblyDebugging::clear_row);
+              // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
               this->system_matrix.clear_row(inside_index);
+              // SHARP-ASSEMBLY-DEBUGGING-TOP
+              debug_matrix_8759.finish();
+              // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
               // this->system_matrix.clear_row(inside_index)
               // is not reliable on edge case
 
@@ -3892,7 +3922,14 @@ FluidDynamicsSharp<dim>::sharp_edge()
               // particle. As for the other pressure DOFs, the rhs is divided
               // by the pressure_scaling_factor since the pressure DOFs are
               // rescaled in the newton correction.
+              // SHARP-ASSEMBLY-DEBUGGING-TOP
+              SharpAssemblyDebugging::Scope debug_matrix_9272(
+                SharpAssemblyDebugging::matrix_add);
+              // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
               this->system_matrix.add(inside_index, inside_index, sum_line);
+              // SHARP-ASSEMBLY-DEBUGGING-TOP
+              debug_matrix_9272.finish();
+              // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
               this->system_rhs(inside_index) =
                 -this->evaluation_point(inside_index) * sum_line /
                 this->simulation_parameters.stabilization
@@ -3976,6 +4013,12 @@ FluidDynamicsSharp<dim>::sharp_edge()
                     global_index_overwrite,
                     cache_particle_id,
                     periodic_frame_index};
+                  // SHARP-ASSEMBLY-DEBUGGING-TOP
+                  SharpAssemblyDebugging::count(
+                    ib_done.find(stencil_cache_key) == ib_done.end() ?
+                      SharpAssemblyDebugging::cache_misses :
+                      SharpAssemblyDebugging::cache_hits);
+                  // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
                   if (ib_done.find(stencil_cache_key) == ib_done.end())
                     {
                       const int component_i =
@@ -4006,8 +4049,15 @@ FluidDynamicsSharp<dim>::sharp_edge()
                                 local_dof_indices[i]))
                             {
                               // Clear the line if there is something on it
+                              // SHARP-ASSEMBLY-DEBUGGING-TOP
+                              SharpAssemblyDebugging::Scope debug_matrix_15276(
+                                SharpAssemblyDebugging::clear_row);
+                              // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
                               this->system_matrix.clear_row(
                                 global_index_overwrite);
+                              // SHARP-ASSEMBLY-DEBUGGING-TOP
+                              debug_matrix_15276.finish();
+                              // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
                               // Get the constraint equations
                               auto local_entries =
                                 *this->zero_constraints.get_constraint_entries(
@@ -4031,9 +4081,16 @@ FluidDynamicsSharp<dim>::sharp_edge()
                                     col,
                                     entries * sum_line);
                                 }
+                              // SHARP-ASSEMBLY-DEBUGGING-TOP
+                              SharpAssemblyDebugging::Scope debug_matrix_16681(
+                                SharpAssemblyDebugging::matrix_add);
+                              // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
                               this->system_matrix.add(local_dof_indices[i],
                                                       local_dof_indices[i],
                                                       sum_line);
+                              // SHARP-ASSEMBLY-DEBUGGING-TOP
+                              debug_matrix_16681.finish();
+                              // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
 
                               // Write the RHS
                               this->system_rhs(local_dof_indices[i]) =
@@ -4048,8 +4105,15 @@ FluidDynamicsSharp<dim>::sharp_edge()
                                 local_dof_indices[i]))
                             {
                               // Clear the line if there is something on it
+                              // SHARP-ASSEMBLY-DEBUGGING-TOP
+                              SharpAssemblyDebugging::Scope debug_matrix_17640(
+                                SharpAssemblyDebugging::clear_row);
+                              // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
                               this->system_matrix.clear_row(
                                 global_index_overwrite);
+                              // SHARP-ASSEMBLY-DEBUGGING-TOP
+                              debug_matrix_17640.finish();
+                              // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
                               // Get the constraint equations
 
                               auto local_entries_non_zero =
@@ -4077,9 +4141,16 @@ FluidDynamicsSharp<dim>::sharp_edge()
                                     col_non_zero,
                                     entries_non_zero * sum_line);
                                 }
+                              // SHARP-ASSEMBLY-DEBUGGING-TOP
+                              SharpAssemblyDebugging::Scope debug_matrix_19095(
+                                SharpAssemblyDebugging::matrix_add);
+                              // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
                               this->system_matrix.add(local_dof_indices[i],
                                                       local_dof_indices[i],
                                                       sum_line);
+                              // SHARP-ASSEMBLY-DEBUGGING-TOP
+                              debug_matrix_19095.finish();
+                              // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
 
                               // Write the RHS
                               this->system_rhs(local_dof_indices[i]) =
@@ -4108,7 +4179,14 @@ FluidDynamicsSharp<dim>::sharp_edge()
                           // IB constraints.
 
                           // Clear the current line of this dof
+                          // SHARP-ASSEMBLY-DEBUGGING-TOP
+                          SharpAssemblyDebugging::Scope debug_matrix_20773(
+                            SharpAssemblyDebugging::clear_row);
+                          // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
                           this->system_matrix.clear_row(global_index_overwrite);
+                          // SHARP-ASSEMBLY-DEBUGGING-TOP
+                          debug_matrix_20773.finish();
+                          // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
 
                           // Define the points for the IB stencil based on the
                           // degree, particle position, and DOF position. The
@@ -4173,6 +4251,10 @@ FluidDynamicsSharp<dim>::sharp_edge()
                                       periodic_domain_upper);
                                   if (wrapped_point != point_to_find_cell)
                                     {
+                                      // SHARP-ASSEMBLY-DEBUGGING-TOP
+                                      SharpAssemblyDebugging::Scope debug_retry(
+                                        SharpAssemblyDebugging::periodic_retry);
+                                      // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
                                       try
                                         {
                                           stencil_cell = LetheGridTools::
@@ -4261,9 +4343,16 @@ FluidDynamicsSharp<dim>::sharp_edge()
                               // with pressure shock when the DOF passes from
                               // part of the boundary to the fluid.
 
+                              // SHARP-ASSEMBLY-DEBUGGING-TOP
+                              SharpAssemblyDebugging::Scope debug_matrix_29868(
+                                SharpAssemblyDebugging::matrix_add);
+                              // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
                               this->system_matrix.add(global_index_overwrite,
                                                       global_index_overwrite,
                                                       sum_line);
+                              // SHARP-ASSEMBLY-DEBUGGING-TOP
+                              debug_matrix_29868.finish();
+                              // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
                               skip_stencil = true;
 
                               // Tolerance to define an intersection of
@@ -4541,10 +4630,17 @@ FluidDynamicsSharp<dim>::sharp_edge()
                               if (dummy_dof)
                                 {
                                   // The DOF is dummy
+                                  // SHARP-ASSEMBLY-DEBUGGING-TOP
+                                  SharpAssemblyDebugging::Scope debug_matrix_46327(
+                                    SharpAssemblyDebugging::matrix_add);
+                                  // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
                                   this->system_matrix.add(
                                     global_index_overwrite,
                                     global_index_overwrite,
                                     sum_line);
+                                  // SHARP-ASSEMBLY-DEBUGGING-TOP
+                                  debug_matrix_46327.finish();
+                                  // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
                                   auto &system_rhs = this->system_rhs;
                                   system_rhs(global_index_overwrite) = 0;
                                 }
@@ -4561,8 +4657,25 @@ FluidDynamicsSharp<dim>::sharp_edge()
         }
     }
 
+  // SHARP-ASSEMBLY-DEBUGGING-TOP
+  SharpAssemblyDebugging::Scope debug_matrix_47075(
+    SharpAssemblyDebugging::compression);
+  // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
   this->system_rhs.compress(VectorOperation::insert);
+  // SHARP-ASSEMBLY-DEBUGGING-TOP
+  debug_matrix_47075.finish();
+  // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
+  // SHARP-ASSEMBLY-DEBUGGING-TOP
+  SharpAssemblyDebugging::Scope debug_matrix_47129(
+    SharpAssemblyDebugging::compression);
+  // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
   this->system_matrix.compress(VectorOperation::add);
+  // SHARP-ASSEMBLY-DEBUGGING-TOP
+  debug_matrix_47129.finish();
+  // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
+  // SHARP-ASSEMBLY-DEBUGGING-TOP
+  debug_assembly.report();
+  // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
 }
 
 
@@ -5881,7 +5994,14 @@ FluidDynamicsSharp<dim>::add_matrix_entry_with_periodic_expansion(
       // entries absent from the condensed sparsity pattern.
       try
         {
+          // SHARP-ASSEMBLY-DEBUGGING-TOP
+          SharpAssemblyDebugging::Scope debug_matrix_652(
+            SharpAssemblyDebugging::matrix_add);
+          // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
           this->system_matrix.add(row_dof, col_dof, value);
+          // SHARP-ASSEMBLY-DEBUGGING-TOP
+          debug_matrix_652.finish();
+          // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
         }
       catch (...)
         {}
@@ -5903,7 +6023,14 @@ FluidDynamicsSharp<dim>::add_matrix_entry_with_periodic_expansion(
 
   if (!col_is_constrained)
     {
+      // SHARP-ASSEMBLY-DEBUGGING-TOP
+      SharpAssemblyDebugging::Scope debug_matrix_1573(
+        SharpAssemblyDebugging::matrix_add);
+      // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
       this->system_matrix.add(row_dof, col_dof, value);
+      // SHARP-ASSEMBLY-DEBUGGING-TOP
+      debug_matrix_1573.finish();
+      // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
     }
   else
     {
@@ -5923,12 +6050,26 @@ FluidDynamicsSharp<dim>::add_matrix_entry_with_periodic_expansion(
             {
               const types::global_dof_index master_col = entry.first;
               const double                  weight     = entry.second;
+              // SHARP-ASSEMBLY-DEBUGGING-TOP
+              SharpAssemblyDebugging::Scope debug_matrix_2289(
+                SharpAssemblyDebugging::matrix_add);
+              // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
               this->system_matrix.add(row_dof, master_col, weight * value);
+              // SHARP-ASSEMBLY-DEBUGGING-TOP
+              debug_matrix_2289.finish();
+              // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
             }
         }
       else
         {
+          // SHARP-ASSEMBLY-DEBUGGING-TOP
+          SharpAssemblyDebugging::Scope debug_matrix_2410(
+            SharpAssemblyDebugging::matrix_add);
+          // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
           this->system_matrix.add(row_dof, col_dof, value);
+          // SHARP-ASSEMBLY-DEBUGGING-TOP
+          debug_matrix_2410.finish();
+          // SHARP-ASSEMBLY-DEBUGGING-BOTTOM
         }
     }
 }
