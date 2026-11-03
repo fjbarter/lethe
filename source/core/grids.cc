@@ -23,6 +23,12 @@
 #include <deal.II/grid/grid_tools.h>
 #include <deal.II/grid/tria.h>
 
+// SHARP-SETUP-MESH-MEASUREMENT-TOP
+#include <chrono>
+#include <iomanip>
+#include <sstream>
+// SHARP-SETUP-MESH-MEASUREMENT-BOTTOM
+
 #include <algorithm>
 #include <fstream>
 #include <iostream>
@@ -380,13 +386,58 @@ setup_periodic_boundary_conditions(
       std::vector<GridTools::PeriodicFacePair<
         typename Triangulation<dim, spacedim>::cell_iterator>>
         periodicity_vector;
+      // SHARP-SETUP-MESH-MEASUREMENT-TOP
+      const auto         debug_comm = triangulation.get_mpi_communicator();
+      ConditionalOStream debug_out(
+        std::cout, Utilities::MPI::this_mpi_process(debug_comm) == 0);
+      // Print and flush before each expensive call so a stalled setup can be
+      // identified even if the job reaches its wall-time limit inside it.
+      debug_out << "[SHARP-MESH] boundary_pair=" << id << ','
+                << periodic_boundary.neighbor_id
+                << " direction=" << periodic_boundary.direction
+                << " local_active_cells="
+                << triangulation.n_locally_owned_active_cells()
+                << " phase=collect_periodic_faces begin" << std::endl;
+      auto       debug_start  = std::chrono::steady_clock::now();
+      const auto debug_report = [&](const char *phase) {
+        const double elapsed = std::chrono::duration<double>(
+                                 std::chrono::steady_clock::now() - debug_start)
+                                 .count();
+        // Measure before the reductions: no extra barrier is inserted in the
+        // timed operation. Spread includes any arrival imbalance between ranks.
+        const double lo   = Utilities::MPI::min(elapsed, debug_comm);
+        const double hi   = Utilities::MPI::max(elapsed, debug_comm);
+        const double mean = Utilities::MPI::sum(elapsed, debug_comm) /
+                            Utilities::MPI::n_mpi_processes(debug_comm);
+        std::ostringstream message;
+        message << std::scientific << std::setprecision(6)
+                << "[SHARP-MESH] boundary_pair=" << id << ','
+                << periodic_boundary.neighbor_id << " phase=" << phase
+                << " seconds[min/mean/max]=" << lo << '/' << mean << '/' << hi;
+        debug_out << message.str() << std::endl;
+      };
+      // SHARP-SETUP-MESH-MEASUREMENT-BOTTOM
       GridTools::collect_periodic_faces(
         *dynamic_cast<Triangulation<dim, spacedim> *>(triangulation_ptr),
         id,
         periodic_boundary.neighbor_id,
         periodic_boundary.direction,
         periodicity_vector);
+      // SHARP-SETUP-MESH-MEASUREMENT-TOP
+      debug_report("collect_periodic_faces");
+      const auto debug_pairs =
+        static_cast<unsigned long long>(periodicity_vector.size());
+      const auto debug_min_pairs = Utilities::MPI::min(debug_pairs, debug_comm);
+      const auto debug_max_pairs = Utilities::MPI::max(debug_pairs, debug_comm);
+      debug_out << "[SHARP-MESH] periodic_face_pairs[min/max]="
+                << debug_min_pairs << '/' << debug_max_pairs
+                << " phase=add_periodicity begin" << std::endl;
+      debug_start = std::chrono::steady_clock::now();
+      // SHARP-SETUP-MESH-MEASUREMENT-BOTTOM
       triangulation.add_periodicity(periodicity_vector);
+      // SHARP-SETUP-MESH-MEASUREMENT-TOP
+      debug_report("add_periodicity");
+      // SHARP-SETUP-MESH-MEASUREMENT-BOTTOM
     }
 }
 

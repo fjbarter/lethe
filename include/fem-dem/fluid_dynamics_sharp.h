@@ -33,6 +33,12 @@
 #include <utility>
 #include <vector>
 
+// SHARP-TEMPORARY-DEBUG-TOP
+#include <array>
+#include <chrono>
+#include <string>
+// SHARP-TEMPORARY-DEBUG-BOTTOM
+
 using namespace dealii;
 
 /**
@@ -62,7 +68,16 @@ public:
   void
   assemble_system_matrix() override
   {
+    // SHARP-TEMPORARY-DEBUG-TOP
+    debug_base_valid       = false;
+    debug_rhs_calls        = 0;
+    const auto debug_start = std::chrono::steady_clock::now();
+    // SHARP-TEMPORARY-DEBUG-BOTTOM
     assemble_matrix_and_rhs();
+    // SHARP-TEMPORARY-DEBUG-TOP
+    debug_capture_matrix();
+    debug_phase("matrix_and_coupling", debug_start);
+    // SHARP-TEMPORARY-DEBUG-BOTTOM
   }
 
   /**
@@ -71,8 +86,20 @@ public:
   void
   assemble_system_rhs() override
   {
+    // SHARP-TEMPORARY-DEBUG-TOP
+    const auto debug_start = std::chrono::steady_clock::now();
+    debug_prepare_rhs();
+    // SHARP-TEMPORARY-DEBUG-BOTTOM
     assemble_rhs();
+    // SHARP-TEMPORARY-DEBUG-TOP
+    debug_residual("before_sharp");
+    // SHARP-TEMPORARY-DEBUG-BOTTOM
     sharp_edge();
+    // SHARP-TEMPORARY-DEBUG-TOP
+    debug_finish_rhs();
+    debug_residual("after_sharp");
+    debug_phase("rhs_and_sharp", debug_start);
+    // SHARP-TEMPORARY-DEBUG-BOTTOM
   }
 
 protected:
@@ -87,6 +114,41 @@ protected:
   setup_dofs_fd() override;
 
 private:
+  // SHARP-TEMPORARY-DEBUG-TOP
+  /** @brief Capture the assembled linearization without changing solver state. */
+  void
+  debug_capture_matrix();
+  /** @brief Predict a trial RHS using the current matrix and captured base state. */
+  void
+  debug_prepare_rhs();
+  /** @brief Compare a trial RHS with its linear prediction, split by row type. */
+  void
+  debug_finish_rhs();
+  /** @brief Report RHS norms by component and row class. @param phase Label. */
+  void
+  debug_residual(const std::string &phase);
+  /** @brief Report rank timing. @param phase Label. @param start Start time. */
+  void
+  debug_phase(const std::string                    &phase,
+              std::chrono::steady_clock::time_point start);
+  /** @brief Inspect particle state. @param phase Label. @param save Save baseline. */
+  void
+  debug_particles(const std::string &phase, bool save);
+  /** @brief Report stencil counters accumulated during one Sharp assembly. */
+  void
+                   debug_stencils();
+  bool             debug_base_valid       = false;
+  bool             debug_components_ready = false;
+  unsigned int     debug_rhs_calls        = 0;
+  GlobalVectorType debug_base_solution, debug_base_rhs, debug_prediction;
+  double           debug_trial_norm = 0.;
+  std::map<types::global_dof_index, unsigned int> debug_components;
+  std::map<types::global_dof_index, unsigned int> debug_row_kind;
+  std::array<double, 8>                           debug_stencil_counts{};
+  std::vector<double>                             debug_particle_baseline;
+  std::vector<double> debug_velocity_inverse, debug_omega_inverse;
+  // SHARP-TEMPORARY-DEBUG-BOTTOM
+
   struct ParticlePeriodicFrame;
   struct CutCellInfo;
   struct OverconstrainedFluidCellInfo;
@@ -182,15 +244,43 @@ private:
   virtual void
   assemble_matrix_and_rhs()
   {
+    // SHARP-TEMPORARY-DEBUG-TOP
+    debug_particles("before_coupling", true);
+    // SHARP-TEMPORARY-DEBUG-BOTTOM
     if (some_particles_are_coupled)
       {
         if (this->get_current_newton_iteration() != 0)
           {
+            // SHARP-TEMPORARY-DEBUG-TOP
+            const auto debug_forces_start = std::chrono::steady_clock::now();
+            // SHARP-TEMPORARY-DEBUG-BOTTOM
             force_on_ib();
+            // SHARP-TEMPORARY-DEBUG-TOP
+            debug_phase("forces", debug_forces_start);
+            // SHARP-TEMPORARY-DEBUG-BOTTOM
           }
+        // SHARP-TEMPORARY-DEBUG-TOP
+        const auto debug_particle_integration_start =
+          std::chrono::steady_clock::now();
+        // SHARP-TEMPORARY-DEBUG-BOTTOM
         integrate_particles();
+        // SHARP-TEMPORARY-DEBUG-TOP
+        debug_phase("particle_integration", debug_particle_integration_start);
+        // SHARP-TEMPORARY-DEBUG-BOTTOM
+
+        // SHARP-TEMPORARY-DEBUG-TOP
+        const auto debug_shape_precalculation_start =
+          std::chrono::steady_clock::now();
+        // SHARP-TEMPORARY-DEBUG-BOTTOM
         update_precalculations_for_ib();
+        // SHARP-TEMPORARY-DEBUG-TOP
+        debug_phase("shape_precalculation", debug_shape_precalculation_start);
+        // SHARP-TEMPORARY-DEBUG-BOTTOM
       }
+    // SHARP-TEMPORARY-DEBUG-TOP
+    debug_particles("after_coupling", false);
+    const auto debug_cut_start = std::chrono::steady_clock::now();
+    // SHARP-TEMPORARY-DEBUG-BOTTOM
     // Do the cut cell mapping only if it is the first Newton iteration or
     // if the explicit position integration is false.
     if (this->get_current_newton_iteration() == 0 ||
@@ -202,8 +292,15 @@ private:
         else
           generate_cut_cells_map();
       }
+    // SHARP-TEMPORARY-DEBUG-TOP
+    debug_phase("cut_cell_mapping", debug_cut_start);
+    const auto debug_bulk_start = std::chrono::steady_clock::now();
+    // SHARP-TEMPORARY-DEBUG-BOTTOM
     this->FluidDynamicsMatrixBased<dim>::assemble_system_matrix();
 
+    // SHARP-TEMPORARY-DEBUG-TOP
+    debug_phase("bulk_matrix", debug_bulk_start);
+    // SHARP-TEMPORARY-DEBUG-BOTTOM
     sharp_edge();
   }
 
