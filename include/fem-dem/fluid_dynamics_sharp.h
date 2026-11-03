@@ -145,7 +145,9 @@ private:
   std::map<types::global_dof_index, unsigned int> debug_components;
   std::map<types::global_dof_index, unsigned int> debug_row_kind;
   std::array<double, 8>                           debug_stencil_counts{};
-  std::vector<double>                             debug_particle_baseline;
+  std::map<types::global_dof_index, types::global_dof_index>
+                      debug_pressure_reference;
+  std::vector<double> debug_particle_baseline;
   std::vector<double> debug_velocity_inverse, debug_omega_inverse;
   // SHARP-TEMPORARY-DEBUG-BOTTOM
 
