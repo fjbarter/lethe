@@ -2820,6 +2820,22 @@ OutletBoundaryCondition<dim>::assemble_matrix(
 
                                   local_matrix(i, j) += -beta_terms;
                                 }
+
+                              // During backflow, differentiate u.n as well as
+                              // the velocity it multiplies. This term couples
+                              // normal-velocity changes to every momentum
+                              // component. At u.n = 0, retain the inactive
+                              // branch's zero derivative.
+                              if (normal_outflux < 0. &&
+                                  comp_j < static_cast<unsigned int>(dim))
+                                local_matrix(i, j) -=
+                                  penalty_parameter * beta *
+                                  (scratch_data.face_phi_u[f][q][j] *
+                                   scratch_data.face_normal[f][q]) *
+                                  scratch_data
+                                    .face_velocity_values[f][q][comp_i] *
+                                  scratch_data.face_phi_u[f][q][i][comp_i] *
+                                  JxW;
                             }
                         }
                     }

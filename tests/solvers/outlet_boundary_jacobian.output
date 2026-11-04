@@ -1,0 +1,17 @@
+
+DEAL::2D Q1 backflow: OK
+DEAL::3D Q1 backflow: OK
+DEAL::2D Q1 outflow: OK
+DEAL::3D Q1 outflow: OK
+DEAL::2D Q1 disabled: OK
+DEAL::3D Q1 disabled: OK
+DEAL::2D Q1 zero normal flow: OK
+DEAL::3D Q1 zero normal flow: OK
+DEAL::2D Q2 backflow: OK
+DEAL::3D Q2 backflow: OK
+DEAL::2D Q2 outflow: OK
+DEAL::3D Q2 outflow: OK
+DEAL::2D Q2 disabled: OK
+DEAL::3D Q2 disabled: OK
+DEAL::2D Q2 zero normal flow: OK
+DEAL::3D Q2 zero normal flow: OK
