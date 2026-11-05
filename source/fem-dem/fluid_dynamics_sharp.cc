@@ -221,6 +221,75 @@ FluidDynamicsSharp<dim>::debug_prepare_rhs()
   delta = this->evaluation_point;
   delta.add(-1., debug_base_solution);
   debug_trial_norm = delta.l2_norm();
+  // Compare outlet activation at the matrix state and the current trial. This
+  // evaluates only boundary faces and never modifies either solution vector.
+  GlobalVectorType debug_ghost_base;
+  debug_ghost_base.reinit(this->locally_owned_dofs,
+                          this->locally_relevant_dofs,
+                          this->mpi_communicator);
+  debug_ghost_base = debug_base_solution;
+  FEFaceValues<dim>                debug_face(*this->mapping,
+                               *this->fe,
+                               *this->face_quadrature,
+                               update_values | update_normal_vectors |
+                                 update_JxW_values);
+  const FEValuesExtractors::Vector debug_velocity(0);
+  std::vector<Tensor<1, dim>>      base_u(this->face_quadrature->size());
+  std::vector<Tensor<1, dim>>      trial_u(this->face_quadrature->size());
+  double outlet_area = 0., activated_area = 0., deactivated_area = 0.;
+  double stable_remainder = 0., switched_remainder = 0.;
+  for (const auto &cell : this->dof_handler->active_cell_iterators())
+    if (cell->is_locally_owned() && cell->at_boundary())
+      for (const auto face : cell->face_indices())
+        if (cell->face(face)->at_boundary())
+          {
+            const auto  id = cell->face(face)->boundary_id();
+            const auto &types =
+              this->simulation_parameters.boundary_conditions.type;
+            const auto type = types.find(id);
+            if (type == types.end() ||
+                type->second != BoundaryConditions::BoundaryType::outlet)
+              continue;
+            debug_face.reinit(cell, face);
+            debug_face[debug_velocity].get_function_values(debug_ghost_base,
+                                                           base_u);
+            debug_face[debug_velocity].get_function_values(
+              this->evaluation_point, trial_u);
+            for (unsigned int q = 0; q < base_u.size(); ++q)
+              {
+                const auto   n = debug_face.normal_vector(q);
+                const double a = base_u[q] * n, b = trial_u[q] * n;
+                const auto   du        = trial_u[q] - base_u[q];
+                auto         predicted = std::min(a, 0.) * base_u[q];
+                if (a < 0.)
+                  predicted += a * du + (du * n) * base_u[q];
+                const double remainder =
+                  (std::min(b, 0.) * trial_u[q] - predicted).norm();
+                const double area = debug_face.JxW(q);
+                outlet_area += area;
+                if (a >= 0. && b < 0.)
+                  activated_area += area;
+                if (a < 0. && b >= 0.)
+                  deactivated_area += area;
+                if ((a < 0.) != (b < 0.))
+                  switched_remainder += area * remainder;
+                else
+                  stable_remainder += area * remainder;
+              }
+          }
+  this->pcout << "[SHARP-TEMP] outlet_trial rhs_call=" << debug_rhs_calls
+              << " area="
+              << Utilities::MPI::sum(outlet_area, this->mpi_communicator)
+              << " activated_area="
+              << Utilities::MPI::sum(activated_area, this->mpi_communicator)
+              << " deactivated_area="
+              << Utilities::MPI::sum(deactivated_area, this->mpi_communicator)
+              << " stable_flux_remainder_integral="
+              << Utilities::MPI::sum(stable_remainder, this->mpi_communicator)
+              << " switched_flux_remainder_integral="
+              << Utilities::MPI::sum(switched_remainder, this->mpi_communicator)
+              << std::endl;
+
   // The matrix acts on a pressure-scaled Newton update. Convert the physical
   // trial displacement back to that convention before testing its prediction.
   const double pressure_scale =
@@ -3090,6 +3159,52 @@ FluidDynamicsSharp<dim>::integrate_particles()
                  particles[p].fluid_forces + gravity_buoyancy_force) /
                 particles[p].mass;
 
+              // SHARP-TEMPORARY-DEBUG-TOP
+              const auto debug_fluid_acceleration =
+                particles[p].fluid_forces / particles[p].mass;
+              const auto debug_contact_acceleration =
+                particles[p].contact_impulsion / (dt * particles[p].mass);
+              const auto debug_gravity_acceleration =
+                gravity_buoyancy_force / particles[p].mass;
+              debug_previous_fluid_acceleration.resize(particles.size());
+              debug_previous_contact_acceleration.resize(particles.size());
+              debug_previous_gravity_acceleration.resize(particles.size());
+              if (this->get_current_newton_iteration() > 0)
+                {
+                  const auto dv =
+                    particles[p].velocity - particles[p].velocity_iter;
+                  const auto dr =
+                    residual_velocity - particles[p].previous_velocity_residual;
+                  const auto df = debug_fluid_acceleration -
+                                  debug_previous_fluid_acceleration[p];
+                  const auto dc = debug_contact_acceleration -
+                                  debug_previous_contact_acceleration[p];
+                  const auto dg = debug_gravity_acceleration -
+                                  debug_previous_gravity_acceleration[p];
+                  const double       dv2 = dv.norm_square();
+                  std::ostringstream out;
+                  out << std::scientific << std::setprecision(12)
+                      << "[SHARP-TEMP] secant_budget newton="
+                      << this->get_current_newton_iteration()
+                      << " particle=" << p << " bdf0=" << bdf_coefs[0]
+                      << " delta_fluid_acceleration=" << df
+                      << " delta_contact_acceleration=" << dc
+                      << " delta_gravity_acceleration=" << dg
+                      << " closure_error="
+                      << (dr + bdf_coefs[0] * dv - df - dc - dg).norm()
+                      << " dv_squared=" << dv2 << " fluid_projected_slope="
+                      << (dv2 > 0. ? scalar_product(dv, df) / dv2 : 0.)
+                      << " contact_projected_slope="
+                      << (dv2 > 0. ? scalar_product(dv, dc) / dv2 : 0.);
+                  this->pcout << out.str() << std::endl;
+                }
+              debug_previous_fluid_acceleration[p] = debug_fluid_acceleration;
+              debug_previous_contact_acceleration[p] =
+                debug_contact_acceleration;
+              debug_previous_gravity_acceleration[p] =
+                debug_gravity_acceleration;
+              // SHARP-TEMPORARY-DEBUG-BOTTOM
+
               double inverse_of_relaxation_coefficient_velocity =
                 -bdf_coefs[0] -
                 0.5 * volume * fluid_density / particles[p].mass / dt + DBL_MIN;
@@ -3183,6 +3298,36 @@ FluidDynamicsSharp<dim>::integrate_particles()
                   particles[p].position = ib_dem.dem_particles[p].position;
                   particles[p].set_position(particles[p].position);
                 }
+
+              // SHARP-TEMPORARY-DEBUG-TOP
+              Tensor<1, dim> debug_position_equation;
+              for (unsigned int d = 0; d < dim; ++d)
+                {
+                  debug_position_equation[d] =
+                    bdf_coefs[0] * particles[p].position[d] -
+                    particles[p].velocity[d];
+                  for (unsigned int i = 1;
+                       i <= number_of_previous_solutions(method);
+                       ++i)
+                    debug_position_equation[d] +=
+                      bdf_coefs[i] * particles[p].previous_positions[i - 1][d];
+                }
+              std::ostringstream debug_consistency;
+              debug_consistency
+                << std::scientific << std::setprecision(12)
+                << "[SHARP-TEMP] particle_consistency newton="
+                << this->get_current_newton_iteration() << " particle=" << p
+                << " position_bdf_velocity_defect=" << debug_position_equation
+                << " dem_vs_corrected_velocity="
+                << (ib_dem.dem_particles[p].velocity - particles[p].velocity)
+                << " frozen_force_residual_after="
+                << (residual_velocity -
+                    bdf_coefs[0] *
+                      (particles[p].velocity - save_particle_state.velocity))
+                     .norm()
+                << " actual_residual_before=" << residual_velocity.norm();
+              this->pcout << debug_consistency.str() << std::endl;
+              // SHARP-TEMPORARY-DEBUG-BOTTOM
 
               // Test the normalized geometry without changing the integration
               // frame. All motion modes are normalized together below.

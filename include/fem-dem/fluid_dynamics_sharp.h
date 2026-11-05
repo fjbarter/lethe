@@ -149,6 +149,11 @@ private:
                       debug_pressure_reference;
   std::vector<double> debug_particle_baseline;
   std::vector<double> debug_velocity_inverse, debug_omega_inverse;
+  // Previous force accelerations separate the contributions to the secant
+  // slope.
+  std::vector<Tensor<1, 3>> debug_previous_fluid_acceleration;
+  std::vector<Tensor<1, 3>> debug_previous_contact_acceleration;
+  std::vector<Tensor<1, 3>> debug_previous_gravity_acceleration;
   // SHARP-TEMPORARY-DEBUG-BOTTOM
 
   struct ParticlePeriodicFrame;
