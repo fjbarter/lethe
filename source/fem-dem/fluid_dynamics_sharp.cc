@@ -211,6 +211,90 @@ FluidDynamicsSharp<dim>::debug_capture_matrix()
 
 template <int dim>
 void
+FluidDynamicsSharp<dim>::debug_force_feedback()
+{
+  const auto start = std::chrono::steady_clock::now();
+  // Geometry remains fixed throughout this probe. Save only the force outputs
+  // that force_on_ib writes; production kinematics are never changed here.
+  const auto capture = [&]() {
+    std::vector<std::array<Tensor<1, 3>, 4>> values;
+    for (const auto &particle : particles)
+      values.push_back({particle.fluid_forces,
+                        particle.fluid_pressure_forces,
+                        particle.fluid_viscous_forces,
+                        particle.fluid_torque});
+    return values;
+  };
+  const auto       original = capture();
+  GlobalVectorType saved_solution;
+  saved_solution.reinit(this->locally_owned_dofs, this->mpi_communicator);
+  saved_solution     = this->evaluation_point;
+  const auto restore = [&]() {
+    this->evaluation_point = saved_solution;
+    for (unsigned int p = 0; p < particles.size(); ++p)
+      {
+        particles[p].fluid_forces          = original[p][0];
+        particles[p].fluid_pressure_forces = original[p][1];
+        particles[p].fluid_viscous_forces  = original[p][2];
+        particles[p].fluid_torque          = original[p][3];
+      }
+  };
+  try
+    {
+      // A repeated evaluation detects dependence on warmed geometry caches.
+      force_on_ib();
+      const auto repeated = capture();
+      if (debug_force_baseline_valid &&
+          debug_previous_force_solution.size() == saved_solution.size() &&
+          debug_previous_force_values.size() == particles.size())
+        {
+          this->evaluation_point = debug_previous_force_solution;
+          force_on_ib();
+          const auto frozen = capture();
+          for (unsigned int p = 0; p < particles.size(); ++p)
+            {
+              std::ostringstream out;
+              out << std::scientific << std::setprecision(12)
+                  << "[SHARP-TEMP] force_feedback newton="
+                  << this->get_current_newton_iteration() << " particle=" << p
+                  << " pressure_force=" << original[p][1]
+                  << " viscous_force=" << original[p][2]
+                  << " fluid_field_delta=" << original[p][0] - frozen[p][0]
+                  << " geometry_stencil_delta="
+                  << frozen[p][0] - debug_previous_force_values[p][0]
+                  << " pressure_field_delta=" << original[p][1] - frozen[p][1]
+                  << " pressure_geometry_delta="
+                  << frozen[p][1] - debug_previous_force_values[p][1]
+                  << " torque_field_delta=" << original[p][3] - frozen[p][3]
+                  << " torque_geometry_delta="
+                  << frozen[p][3] - debug_previous_force_values[p][3]
+                  << " force_repeat_error="
+                  << (repeated[p][0] - original[p][0]).norm()
+                  << " torque_repeat_error="
+                  << (repeated[p][3] - original[p][3]).norm();
+              this->pcout << out.str() << std::endl;
+            }
+        }
+      else
+        this->pcout << "[SHARP-TEMP] force_feedback baseline newton="
+                    << this->get_current_newton_iteration() << std::endl;
+    }
+  catch (...)
+    {
+      restore();
+      throw;
+    }
+  restore();
+  debug_previous_force_solution.reinit(this->locally_owned_dofs,
+                                       this->mpi_communicator);
+  debug_previous_force_solution = saved_solution;
+  debug_previous_force_values   = original;
+  debug_force_baseline_valid    = true;
+  debug_phase("force_feedback_probe", start);
+}
+
+template <int dim>
+void
 FluidDynamicsSharp<dim>::debug_prepare_rhs()
 {
   ++debug_rhs_calls;
@@ -6348,8 +6432,9 @@ void
 FluidDynamicsSharp<dim>::setup_dofs_fd()
 {
   // SHARP-TEMPORARY-DEBUG-TOP
-  debug_base_valid       = false;
-  debug_components_ready = false;
+  debug_force_baseline_valid = false;
+  debug_base_valid           = false;
+  debug_components_ready     = false;
   debug_components.clear();
   debug_pressure_reference.clear();
   debug_row_kind.clear();

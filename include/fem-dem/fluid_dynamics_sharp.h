@@ -136,10 +136,16 @@ private:
   debug_particles(const std::string &phase, bool save);
   /** @brief Report stencil counters accumulated during one Sharp assembly. */
   void
-                   debug_stencils();
-  bool             debug_base_valid       = false;
-  bool             debug_components_ready = false;
-  unsigned int     debug_rhs_calls        = 0;
+  debug_stencils();
+  /** @brief Separate fluid-field and geometry contributions to force changes. */
+  void
+                                           debug_force_feedback();
+  GlobalVectorType                         debug_previous_force_solution;
+  std::vector<std::array<Tensor<1, 3>, 4>> debug_previous_force_values;
+  bool                                     debug_force_baseline_valid = false;
+  bool                                     debug_base_valid           = false;
+  bool                                     debug_components_ready     = false;
+  unsigned int                             debug_rhs_calls            = 0;
   GlobalVectorType debug_base_solution, debug_base_rhs, debug_prediction;
   double           debug_trial_norm = 0.;
   std::map<types::global_dof_index, unsigned int> debug_components;
@@ -253,6 +259,8 @@ private:
   {
     // SHARP-TEMPORARY-DEBUG-TOP
     debug_particles("before_coupling", true);
+    if (this->get_current_newton_iteration() == 0)
+      debug_force_baseline_valid = false;
     // SHARP-TEMPORARY-DEBUG-BOTTOM
     if (some_particles_are_coupled)
       {
@@ -264,6 +272,7 @@ private:
             force_on_ib();
             // SHARP-TEMPORARY-DEBUG-TOP
             debug_phase("forces", debug_forces_start);
+            debug_force_feedback();
             // SHARP-TEMPORARY-DEBUG-BOTTOM
           }
         // SHARP-TEMPORARY-DEBUG-TOP
