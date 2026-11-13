@@ -251,10 +251,10 @@ FluidDynamicsSharp<dim>::debug_force_feedback()
   const auto capture = [&]() {
     std::vector<std::array<Tensor<1, 3>, 4>> values;
     for (const auto &particle : particles)
-      values.push_back({particle.fluid_forces,
-                        particle.fluid_pressure_forces,
-                        particle.fluid_viscous_forces,
-                        particle.fluid_torque});
+      values.push_back({{particle.fluid_forces,
+                         particle.fluid_pressure_forces,
+                         particle.fluid_viscous_forces,
+                         particle.fluid_torque}});
     return values;
   };
   const auto       original = capture();
@@ -1060,30 +1060,23 @@ FluidDynamicsSharp<dim>::generate_cut_cells_map()
                     }
                 }
 
-              // We loop on every face of the cell, and if the face is at a
-              // boundary we count it as constrained.
+              // Count boundary DoFs as constrained, except on a weak outlet
+              // in periodic Sharp simulations. The outlet does not prescribe
+              // the velocity and must not make a fluid cell overconstrained.
               size_t nb_faces = cell->n_faces();
               for (unsigned int f = 0; f < nb_faces; ++f)
                 {
                   const auto face = cell->face(f);
                   if (face->at_boundary())
                     {
-                      // SHARP-TEMPORARY-DEBUG-TOP
-                      // Experimental isolation: outlet conditions are weak,
-                      // so test classification without counting those DoFs
-                      // as constrained merely because they lie on a boundary.
-                      if (std::getenv("SHARP_DEBUG_EXCLUDE_OUTLET_OVERCONSTRAINT") !=
-                          nullptr)
-                        {
-                          const auto &types =
-                            this->simulation_parameters.boundary_conditions.type;
-                          const auto boundary_type = types.find(face->boundary_id());
-                          if (boundary_type != types.end() &&
-                              boundary_type->second ==
-                                BoundaryConditions::BoundaryType::outlet)
-                            continue;
-                        }
-                      // SHARP-TEMPORARY-DEBUG-BOTTOM
+                      const auto &types =
+                        this->simulation_parameters.boundary_conditions.type;
+                      const auto boundary_type = types.find(face->boundary_id());
+                      if (sharp_ib_periodic_boundaries.is_periodic_enabled() &&
+                          boundary_type != types.end() &&
+                          boundary_type->second ==
+                            BoundaryConditions::BoundaryType::outlet)
+                        continue;
                       face->get_dof_indices(local_face_dof_indices);
                       for (const auto &id : local_face_dof_indices)
                         {
@@ -6559,22 +6552,19 @@ FluidDynamicsSharp<dim>::setup_dofs_fd()
   // constraints, vector reinit, sparsity pattern, matrix reinit).
   FluidDynamicsMatrixBased<dim>::setup_dofs_fd();
 
-  // SHARP-TEMPORARY-DEBUG-TOP
-  // Experimental control: test whether Sharp's ghost stencil columns require
-  // constraints communicated from their owning ranks before graph assembly.
-  if (std::getenv("SHARP_DEBUG_SYNC_CONSTRAINTS") != nullptr)
-    {
-      this->zero_constraints.make_consistent_in_parallel(
-        this->locally_owned_dofs, this->locally_relevant_dofs, this->mpi_communicator);
-      this->nonzero_constraints.make_consistent_in_parallel(
-        this->locally_owned_dofs, this->locally_relevant_dofs, this->mpi_communicator);
-    }
-  // SHARP-TEMPORARY-DEBUG-BOTTOM
-
   // If periodic boundaries are not enabled, the standard sparsity
   // pattern (built with keep_constrained_dofs=false) is sufficient.
   if (!sharp_ib_periodic_boundaries.is_periodic_enabled())
     return;
+
+  // Sharp stencils may use DoFs on ghost cells. Import their constraints from
+  // their owners before constructing the sparsity pattern or expanding stencil
+  // columns, so all ranks apply the same periodic and boundary constraints.
+  this->zero_constraints.make_consistent_in_parallel(this->locally_owned_dofs,
+                                                     this->locally_relevant_dofs,
+                                                     this->mpi_communicator);
+  this->nonzero_constraints.make_consistent_in_parallel(
+    this->locally_owned_dofs, this->locally_relevant_dofs, this->mpi_communicator);
 
   // The base Setup DOFs scope has ended; report this rebuild separately.
   TimerOutput::Scope timer(this->computing_timer,

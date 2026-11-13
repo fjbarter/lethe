@@ -2836,11 +2836,9 @@ OutletBoundaryCondition<dim>::assemble_matrix(
 
                                   local_matrix(i, j) += -beta_terms;
                                 }
-                              // SHARP-TEMPORARY-DEBUG-TOP
-                              // Optional diagnostic: include the derivative of
-                              // normal velocity on the active backflow branch.
-                              if (std::getenv("SHARP_DEBUG_OUTLET_JACOBIAN") != nullptr &&
-                                  normal_outflux < 0. &&
+                              // Differentiate both velocity factors in the
+                              // backflow stabilization term.
+                              if (normal_outflux < 0. &&
                                   comp_j < static_cast<unsigned int>(dim))
                                 local_matrix(i, j) -=
                                   penalty_parameter * beta *
@@ -2848,10 +2846,10 @@ OutletBoundaryCondition<dim>::assemble_matrix(
                                    scratch_data.face_normal[f][q]) *
                                   scratch_data.face_velocity_values[f][q][comp_i] *
                                   scratch_data.face_phi_u[f][q][i][comp_i] * JxW;
+                              // SHARP-TEMPORARY-DEBUG-TOP
                               // Optional correction to the derivative for the
                               // smoothed experimental backflow law.
                               if (debug_smooth > 0. &&
-                                  std::getenv("SHARP_DEBUG_OUTLET_JACOBIAN") != nullptr &&
                                   comp_j < static_cast<unsigned int>(dim))
                                 local_matrix(i, j) -=
                                   penalty_parameter * beta * (debug_slope - 1.) *
