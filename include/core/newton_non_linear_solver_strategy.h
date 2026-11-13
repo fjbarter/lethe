@@ -6,6 +6,15 @@
 
 #include <core/physics_solver_strategy.h>
 
+// SHARP-TEMPORARY-DEBUG-TOP
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <iomanip>
+#include <sstream>
+// SHARP-TEMPORARY-DEBUG-BOTTOM
+
+
 /**
  * @brief Non-linear solver for non-linear systems of equations which uses a Newton
  * method with \f$\alpha\f$ relaxation to ensure that the residual is
@@ -86,6 +95,22 @@ NewtonNonLinearSolverStrategy<VectorType>::solve()
       if (assemble_rhs_this_iteration)
         solver->assemble_system_rhs();
 
+      // SHARP-TEMPORARY-DEBUG-TOP
+      const double debug_fresh_res =
+        solver->get_system_rhs().l2_norm() / rescale_metric;
+      const auto debug_emit =
+        [&](const char *phase, double a, double b, double c) {
+          std::ostringstream out;
+          out << std::scientific << std::setprecision(12)
+              << "[TEMP-NEWTON] iteration=" << this->outer_iteration
+              << " phase=" << phase << " a=" << a << " b=" << b << " c=" << c;
+          solver->pcout << out.str() << std::endl;
+        };
+      debug_emit("fresh_rhs_vs_carried_vs_linesearch_reference",
+                 debug_fresh_res,
+                 current_res,
+                 last_res);
+      // SHARP-TEMPORARY-DEBUG-BOTTOM
       if (this->outer_iteration == 0)
         {
           auto &system_rhs = solver->get_system_rhs();
@@ -107,10 +132,71 @@ NewtonNonLinearSolverStrategy<VectorType>::solve()
             global_res))
         continue;
 
+      // SHARP-TEMPORARY-DEBUG-TOP
+      const auto debug_linear_start = std::chrono::steady_clock::now();
+      debug_emit("linear_solve_begin", debug_fresh_res, 0., 0.);
+      // SHARP-TEMPORARY-DEBUG-BOTTOM
       solver->solve_linear_system();
+      // SHARP-TEMPORARY-DEBUG-TOP
+      debug_emit("linear_solve_seconds",
+                 std::chrono::duration<double>(
+                   std::chrono::steady_clock::now() - debug_linear_start)
+                   .count(),
+                 0.,
+                 0.);
+      const bool debug_choose_best =
+        std::getenv("SHARP_DEBUG_ALPHA_BEST") != nullptr;
+      double debug_best_alpha = 0.;
+      double debug_best_residual = debug_fresh_res;
+      if (debug_choose_best || std::getenv("SHARP_DEBUG_ALPHA_SWEEP") != nullptr)
+        {
+          auto &debug_trial = solver->get_local_evaluation_point();
+          auto &debug_update = solver->get_newton_update();
+          const double debug_min_alpha =
+            std::getenv("SHARP_DEBUG_ALPHA_FINE") != nullptr ?
+              1. / 65536. :
+              1. / 128.;
+          for (double alpha = 1.; alpha >= debug_min_alpha; alpha *= 0.5)
+            {
+              debug_trial = present_solution;
+              debug_trial.add(alpha, debug_update);
+              solver->apply_constraints();
+              evaluation_point = debug_trial;
+              solver->assemble_system_rhs();
+              const double debug_residual =
+                solver->get_system_rhs().l2_norm() / rescale_metric;
+              debug_emit("alpha_sweep_residual_fresh",
+                         alpha,
+                         debug_residual,
+                         debug_fresh_res);
+              if (debug_residual < debug_best_residual)
+                {
+                  debug_best_residual = debug_residual;
+                  debug_best_alpha = alpha;
+                }
+            }
+          evaluation_point = present_solution;
+        }
+      // SHARP-TEMPORARY-DEBUG-BOTTOM
+
       double last_alpha_res = current_res;
 
       unsigned int alpha_iter = 0;
+      // SHARP-TEMPORARY-DEBUG-TOP
+      if (debug_choose_best)
+        {
+          auto &debug_trial = solver->get_local_evaluation_point();
+          debug_trial = present_solution;
+          debug_trial.add(debug_best_alpha, solver->get_newton_update());
+          solver->apply_constraints();
+          evaluation_point = debug_trial;
+          solver->assemble_system_rhs();
+          current_res = solver->get_system_rhs().l2_norm() / rescale_metric;
+          debug_emit("alpha_best_selected", debug_best_alpha, current_res,
+                     debug_fresh_res);
+        }
+      else
+      // SHARP-TEMPORARY-DEBUG-BOTTOM
       for (double alpha = 1.0; alpha > 1e-1; alpha *= 0.5)
         {
           auto &local_evaluation_point = solver->get_local_evaluation_point();
@@ -133,6 +219,12 @@ NewtonNonLinearSolverStrategy<VectorType>::solve()
               solver->output_newton_update_norms();
             }
 
+          // SHARP-TEMPORARY-DEBUG-TOP
+          debug_emit("trial_alpha_rhs_ratio_to_fresh",
+                     alpha,
+                     current_res,
+                     current_res / std::max(debug_fresh_res, 1e-300));
+          // SHARP-TEMPORARY-DEBUG-BOTTOM
           // If it's not the first iteration of alpha check if the residual is
           // smaller than the last alpha iteration. If it's not smaller, we fall
           // back to the last alpha iteration.
@@ -153,6 +245,12 @@ NewtonNonLinearSolverStrategy<VectorType>::solve()
                                 << std::scientific << " increased the residual"
                                 << std::endl;
                 }
+              // SHARP-TEMPORARY-DEBUG-TOP
+              debug_emit("restored_rhs_vs_cached",
+                         solver->get_system_rhs().l2_norm() / rescale_metric,
+                         last_alpha_res,
+                         alpha);
+              // SHARP-TEMPORARY-DEBUG-BOTTOM
               current_res = last_alpha_res;
               break;
             }
@@ -165,6 +263,12 @@ NewtonNonLinearSolverStrategy<VectorType>::solve()
           alpha_iter++;
         }
 
+      // SHARP-TEMPORARY-DEBUG-TOP
+      debug_emit("accepted_rhs_vs_fresh_vs_reference",
+                 solver->get_system_rhs().l2_norm() / rescale_metric,
+                 debug_fresh_res,
+                 last_res);
+      // SHARP-TEMPORARY-DEBUG-BOTTOM
       global_res       = solver->get_current_residual() / rescale_metric;
       present_solution = evaluation_point;
       last_res         = current_res;

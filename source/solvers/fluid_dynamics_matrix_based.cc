@@ -32,6 +32,12 @@
 
 #include <deal.II/numerics/vector_tools.h>
 
+// SHARP-TEMPORARY-DEBUG-TOP
+#include <deal.II/base/mpi.h>
+
+#include <vector>
+// SHARP-TEMPORARY-DEBUG-BOTTOM
+
 #include <cmath>
 #include <exception>
 
@@ -1760,7 +1766,36 @@ FluidDynamicsMatrixBased<dim>::solve_system_GMRES(
           this->computing_timer.enter_subsection(
             "Distribute constraints after linear solver");
 
+          // SHARP-TEMPORARY-DEBUG-TOP
+          GlobalVectorType debug_unconstrained_update(
+            completely_distributed_solution);
+          const auto debug_linear_residual = [&](const char *phase) {
+            GlobalVectorType residual(this->locally_owned_dofs,
+                                      this->mpi_communicator);
+            system_matrix.vmult(residual, completely_distributed_solution);
+            residual.add(-1., system_rhs);
+            std::vector<double> sums(2, 0.);
+            for (const auto row : this->locally_owned_dofs)
+              sums[zero_constraints_used.is_constrained(row) ? 1 : 0] +=
+                residual(row) * residual(row);
+            Utilities::MPI::sum(sums, this->mpi_communicator, sums);
+            this->pcout << "[SHARP-TEMP] linear_equation_check phase=" << phase
+                        << " independent_l2=" << std::sqrt(sums[0])
+                        << " constrained_l2=" << std::sqrt(sums[1])
+                        << " raw_requested_tolerance="
+                        << non_rescaled_linear_solver_tolerance << std::endl;
+          };
+          debug_linear_residual("before_constraint_distribution");
+          // SHARP-TEMPORARY-DEBUG-BOTTOM
           zero_constraints_used.distribute(completely_distributed_solution);
+          // SHARP-TEMPORARY-DEBUG-TOP
+          debug_linear_residual("after_constraint_distribution");
+          debug_unconstrained_update.add(-1., completely_distributed_solution);
+          this->pcout
+            << "[SHARP-TEMP] constraint_distribution_update_change_l2="
+            << debug_unconstrained_update.l2_norm() << std::endl;
+          // SHARP-TEMPORARY-DEBUG-BOTTOM
+
 
           this->computing_timer.leave_subsection(
             "Distribute constraints after linear solver");

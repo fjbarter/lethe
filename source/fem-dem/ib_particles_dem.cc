@@ -17,6 +17,13 @@
 #include <boost/serialization/map.hpp>
 #include <boost/serialization/utility.hpp>
 
+// SHARP-TEMPORARY-DEBUG-TOP
+#include <deal.II/base/conditional_ostream.h>
+
+#include <array>
+#include <iostream>
+// SHARP-TEMPORARY-DEBUG-BOTTOM
+
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -1386,6 +1393,28 @@ IBParticlesDEM<dim>::integrate_particles_motion(const double dt,
                                                 const double rho,
                                                 const double mu)
 {
+  // SHARP-TEMPORARY-DEBUG-TOP
+  unsigned int                       debug_stages = 0;
+  std::vector<std::array<double, 4>> debug_force_peaks(dem_particles.size());
+  // SHARP-TEMPORARY-DEBUG-BOTTOM
+  // SHARP-TEMPORARY-DEBUG-TOP
+  // Report history before resetting particle kinematics to the previous time
+  // level. Repeated trials at the same CFD time must start from accepted
+  // history.
+  const auto debug_history = [&](const char *phase) {
+    ConditionalOStream out(std::cout,
+                           Utilities::MPI::this_mpi_process(mpi_communicator) ==
+                             0);
+    for (const auto &[particle_id, walls] : pw_contact_map)
+      for (const auto &[wall_id, contact] : walls)
+        out << "[SHARP-TEMP] wall_history phase=" << phase
+            << " cfd_time=" << cfd_time << " particle=" << particle_id
+            << " wall=" << wall_id
+            << " tangential_displacement=" << contact.tangential_displacement
+            << " normal_overlap=" << contact.normal_overlap << std::endl;
+  };
+  debug_history("before_dem");
+  // SHARP-TEMPORARY-DEBUG-BOTTOM
   // Initialize local containers and physical variables
   using dealii::numbers::PI;
   double dt_dem = dt / parameters->coupling_frequency;
@@ -1505,6 +1534,9 @@ IBParticlesDEM<dim>::integrate_particles_motion(const double dt,
 
           // Refresh seam candidates at each RK stage, including crossings
           // occurring within the DEM substeps.
+          // SHARP-TEMPORARY-DEBUG-TOP
+          ++debug_stages;
+          // SHARP-TEMPORARY-DEBUG-BOTTOM
           if (periodic_offset.norm_square() != 0.)
             update_contact_candidates();
 
@@ -1530,6 +1562,19 @@ IBParticlesDEM<dim>::integrate_particles_motion(const double dt,
                                              lubrication_wall_torque);
             }
 
+          // SHARP-TEMPORARY-DEBUG-TOP
+          for (unsigned int p = 0; p < dem_particles.size(); ++p)
+            {
+              const std::array<double, 4> norms = {
+                {contact_force[p].norm(),
+                 contact_wall_force[p].norm(),
+                 lubrication_force[p].norm(),
+                 lubrication_wall_force[p].norm()}};
+              for (unsigned int k = 0; k < 4; ++k)
+                debug_force_peaks[p][k] =
+                  std::max(debug_force_peaks[p][k], norms[k]);
+            }
+          // SHARP-TEMPORARY-DEBUG-BOTTOM
           for (unsigned int p_i = 0; p_i < dem_particles.size(); ++p_i)
             {
               if (dem_particles[p_i].integrate_motion)
@@ -2012,6 +2057,20 @@ IBParticlesDEM<dim>::integrate_particles_motion(const double dt,
           }
       t += dt_dem;
     }
+  // SHARP-TEMPORARY-DEBUG-TOP
+  ConditionalOStream debug_out(
+    std::cout, Utilities::MPI::this_mpi_process(mpi_communicator) == 0);
+  debug_history("after_dem");
+  debug_out << "[SHARP-TEMP] DEM stages=" << debug_stages
+            << " dt_dem=" << dt_dem << " h_min=" << h_min << " h_max=" << h_max
+            << " rho=" << rho << " mu=" << mu << std::endl;
+  for (unsigned int p = 0; p < dem_particles.size(); ++p)
+    debug_out << "[SHARP-TEMP] DEM_particle=" << p
+              << " root_peak_stage_force_pp_pw_lubpp_lubpw="
+              << debug_force_peaks[p][0] << ',' << debug_force_peaks[p][1]
+              << ',' << debug_force_peaks[p][2] << ','
+              << debug_force_peaks[p][3] << std::endl;
+  // SHARP-TEMPORARY-DEBUG-BOTTOM
 }
 
 template <int dim>

@@ -45,6 +45,722 @@
 #include <stdexcept>
 #include <tuple>
 
+// SHARP-TEMPORARY-DEBUG-TOP
+#include <core/shape.h>
+
+#include <chrono>
+#include <iomanip>
+#include <iostream>
+#include <cstdlib>
+#include <sstream>
+// SHARP-TEMPORARY-DEBUG-BOTTOM
+
+// SHARP-TEMPORARY-DEBUG-TOP
+// Temporary diagnostics: all vector operations use separate owned work vectors.
+// No extra residual assembly, particle integration, or solver update is
+// performed.
+template <int dim>
+void
+FluidDynamicsSharp<dim>::debug_phase(
+  const std::string                    &phase,
+  std::chrono::steady_clock::time_point start)
+{
+  const double seconds =
+    std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+      .count();
+  const double lo   = Utilities::MPI::min(seconds, this->mpi_communicator);
+  const double hi   = Utilities::MPI::max(seconds, this->mpi_communicator);
+  const double mean = Utilities::MPI::sum(seconds, this->mpi_communicator) /
+                      Utilities::MPI::n_mpi_processes(this->mpi_communicator);
+  std::ostringstream out;
+  out << std::scientific << std::setprecision(8) << "[SHARP-TEMP] step="
+      << this->simulation_control->get_iteration_number()
+      << " newton=" << this->get_current_newton_iteration()
+      << " phase=" << phase << " seconds_min_mean_max=" << lo << ',' << mean
+      << ',' << hi;
+  this->pcout << out.str() << std::endl;
+}
+
+template <int dim>
+void
+FluidDynamicsSharp<dim>::debug_capture_matrix()
+{
+  const auto start = std::chrono::steady_clock::now();
+  if (!debug_components_ready)
+    {
+      std::vector<types::global_dof_index> indices(this->fe->n_dofs_per_cell());
+      for (const auto &cell : this->dof_handler->active_cell_iterators())
+        if (!cell->is_artificial())
+          {
+            cell->get_dof_indices(indices);
+            for (unsigned int j = 0; j < indices.size(); ++j)
+              if (this->locally_owned_dofs.is_element(indices[j]))
+                debug_components[indices[j]] =
+                  this->fe->system_to_component_index(j).first;
+          }
+      debug_components_ready = true;
+    }
+  debug_base_solution.reinit(this->locally_owned_dofs, this->mpi_communicator);
+  debug_base_rhs.reinit(this->locally_owned_dofs, this->mpi_communicator);
+  debug_prediction.reinit(this->locally_owned_dofs, this->mpi_communicator);
+  debug_base_solution = this->evaluation_point;
+  debug_base_rhs      = this->system_rhs;
+  debug_base_valid    = true;
+
+  // Matrix health: zero diagonals alone are not proof of singularity in a
+  // saddle-point problem; zero rows and nonfinite entries deserve attention.
+  std::vector<double> counts(4, 0.);
+  double              largest_entry = 0., largest_row = 0., smallest_ratio = 1.;
+  for (const auto row : this->locally_owned_dofs)
+    {
+      double row_sum = 0.;
+      for (auto entry = this->system_matrix.begin(row);
+           entry != this->system_matrix.end(row);
+           ++entry)
+        {
+          const double value = entry->value();
+          if (!std::isfinite(value))
+            ++counts[0];
+          else
+            {
+              row_sum += std::abs(value);
+              largest_entry = std::max(largest_entry, std::abs(value));
+            }
+        }
+      const double diagonal = std::abs(this->system_matrix.el(row, row));
+      if (row_sum == 0.)
+        ++counts[1];
+      if (diagonal == 0.)
+        ++counts[2];
+      if (this->zero_constraints.is_constrained(row))
+        ++counts[3];
+      if (row_sum > 0.)
+        smallest_ratio = std::min(smallest_ratio, diagonal / row_sum);
+      largest_row = std::max(largest_row, row_sum);
+    }
+  Utilities::MPI::sum(counts, this->mpi_communicator, counts);
+  largest_entry  = Utilities::MPI::max(largest_entry, this->mpi_communicator);
+  largest_row    = Utilities::MPI::max(largest_row, this->mpi_communicator);
+  smallest_ratio = Utilities::MPI::min(smallest_ratio, this->mpi_communicator);
+  this->pcout << "[SHARP-TEMP] matrix nonfinite_entries=" << counts[0]
+              << " zero_rows=" << counts[1] << " zero_diagonals=" << counts[2]
+              << " constrained_rows=" << counts[3]
+              << " max_abs_entry=" << largest_entry
+              << " max_row_l1=" << largest_row
+              << " min_abs_diag_over_row_l1=" << smallest_ratio << std::endl;
+  // Inspect the two sign conventions without changing any matrix entry.
+  std::vector<double> constraint_check(4, 0.);
+  for (const auto &[row, kind] : debug_row_kind)
+    if (kind == 5 && this->locally_owned_dofs.is_element(row))
+      {
+        const auto *entries =
+          this->nonzero_constraints.get_constraint_entries(row);
+        if (entries == nullptr)
+          entries = this->zero_constraints.get_constraint_entries(row);
+        if (entries == nullptr)
+          continue;
+        const double diagonal = this->system_matrix.el(row, row);
+        ++constraint_check[0];
+        for (const auto &[master, weight] : *entries)
+          {
+            const double coefficient = this->system_matrix.el(row, master);
+            constraint_check[1] += std::pow(coefficient + weight * diagonal, 2);
+            constraint_check[2] += std::pow(coefficient - weight * diagonal, 2);
+          }
+      }
+  // Matrix columns may extend beyond the locally relevant constraint set on
+  // an adaptively refined mesh. Import ownership-resolved flags instead of
+  // querying AffineConstraints for an index it does not store.
+  IndexSet debug_columns(this->dof_handler->n_dofs());
+  debug_columns.add_indices(this->locally_owned_dofs);
+  if (std::getenv("SHARP_DEBUG_DENSE_RELEVANT_GRAPH") != nullptr)
+    debug_columns.add_range(0, this->dof_handler->n_dofs());
+  else
+    for (const auto row : this->locally_owned_dofs)
+      for (auto entry = this->system_matrix.begin(row);
+           entry != this->system_matrix.end(row);
+           ++entry)
+        debug_columns.add_index(entry->column());
+  debug_columns.compress();
+  GlobalVectorType debug_owned_flags(this->locally_owned_dofs,
+                                     this->mpi_communicator);
+  for (const auto row : this->locally_owned_dofs)
+    {
+      const auto *entries = this->zero_constraints.get_constraint_entries(row);
+      debug_owned_flags(row) =
+        this->zero_constraints.is_constrained(row) ?
+          (entries != nullptr && !entries->empty() ? 2. : 1.) :
+          0.;
+    }
+  debug_owned_flags.compress(VectorOperation::insert);
+  GlobalVectorType debug_column_flags;
+  debug_column_flags.reinit(this->locally_owned_dofs,
+                            debug_columns,
+                            this->mpi_communicator);
+  debug_column_flags = debug_owned_flags;
+  unsigned int debug_printed_constrained_columns = 0;
+  for (const auto row : this->locally_owned_dofs)
+    if (!this->zero_constraints.is_constrained(row))
+      for (auto entry = this->system_matrix.begin(row);
+           entry != this->system_matrix.end(row);
+           ++entry)
+        if (debug_column_flags(entry->column()) > 0.5)
+          {
+            constraint_check[3] += entry->value() * entry->value();
+            if (std::getenv("SHARP_DEBUG_CONSTRAINED_COLUMN_DETAILS") != nullptr &&
+                std::abs(entry->value()) > 1e-8 &&
+                debug_printed_constrained_columns++ < 12)
+              {
+                const auto column = entry->column();
+                const bool relevant = this->locally_relevant_dofs.is_element(column);
+                std::cerr << "[SHARP-TEMP] constrained_column rank="
+                          << Utilities::MPI::this_mpi_process(this->mpi_communicator)
+                          << " row=" << row << " row_kind="
+                          << (debug_row_kind.count(row) ? debug_row_kind.at(row) : 0)
+                          << " column=" << column << " value=" << entry->value()
+                          << " owner_constraint_kind=" << debug_column_flags(column)
+                          << " locally_relevant=" << relevant
+                          << " local_zero_constraint="
+                          << (relevant && this->zero_constraints.is_constrained(column))
+                          << " local_nonzero_constraint="
+                          << (relevant && this->nonzero_constraints.is_constrained(column))
+                          << std::endl;
+              }
+          }
+  Utilities::MPI::sum(constraint_check,
+                      this->mpi_communicator,
+                      constraint_check);
+  this->pcout << "[SHARP-TEMP] sharp_affine_rows=" << constraint_check[0]
+              << " coefficient_error_for_negative_master_sign="
+              << std::sqrt(constraint_check[1])
+              << " coefficient_error_for_positive_master_sign="
+              << std::sqrt(constraint_check[2])
+              << " independent_row_coupling_to_constrained_columns_l2="
+              << std::sqrt(constraint_check[3]) << std::endl;
+  debug_residual("after_matrix_bulk_rhs_not_refreshed");
+  debug_phase("debug_matrix_audit_overhead", start);
+}
+
+template <int dim>
+void
+FluidDynamicsSharp<dim>::debug_force_feedback()
+{
+  const auto start = std::chrono::steady_clock::now();
+  // Geometry remains fixed throughout this probe. Save only the force outputs
+  // that force_on_ib writes; production kinematics are never changed here.
+  const auto capture = [&]() {
+    std::vector<std::array<Tensor<1, 3>, 4>> values;
+    for (const auto &particle : particles)
+      values.push_back({particle.fluid_forces,
+                        particle.fluid_pressure_forces,
+                        particle.fluid_viscous_forces,
+                        particle.fluid_torque});
+    return values;
+  };
+  const auto       original = capture();
+  GlobalVectorType saved_solution;
+  saved_solution.reinit(this->locally_owned_dofs, this->mpi_communicator);
+  saved_solution     = this->evaluation_point;
+  const auto restore = [&]() {
+    this->evaluation_point = saved_solution;
+    for (unsigned int p = 0; p < particles.size(); ++p)
+      {
+        particles[p].fluid_forces          = original[p][0];
+        particles[p].fluid_pressure_forces = original[p][1];
+        particles[p].fluid_viscous_forces  = original[p][2];
+        particles[p].fluid_torque          = original[p][3];
+      }
+  };
+  try
+    {
+      // A repeated evaluation detects dependence on warmed geometry caches.
+      force_on_ib();
+      const auto repeated = capture();
+      if (debug_force_baseline_valid &&
+          debug_previous_force_solution.size() == saved_solution.size() &&
+          debug_previous_force_values.size() == particles.size())
+        {
+          this->evaluation_point = debug_previous_force_solution;
+          force_on_ib();
+          const auto frozen = capture();
+          for (unsigned int p = 0; p < particles.size(); ++p)
+            {
+              std::ostringstream out;
+              out << std::scientific << std::setprecision(12)
+                  << "[SHARP-TEMP] force_feedback newton="
+                  << this->get_current_newton_iteration() << " particle=" << p
+                  << " pressure_force=" << original[p][1]
+                  << " viscous_force=" << original[p][2]
+                  << " fluid_field_delta=" << original[p][0] - frozen[p][0]
+                  << " geometry_stencil_delta="
+                  << frozen[p][0] - debug_previous_force_values[p][0]
+                  << " pressure_field_delta=" << original[p][1] - frozen[p][1]
+                  << " pressure_geometry_delta="
+                  << frozen[p][1] - debug_previous_force_values[p][1]
+                  << " torque_field_delta=" << original[p][3] - frozen[p][3]
+                  << " torque_geometry_delta="
+                  << frozen[p][3] - debug_previous_force_values[p][3]
+                  << " force_repeat_error="
+                  << (repeated[p][0] - original[p][0]).norm()
+                  << " torque_repeat_error="
+                  << (repeated[p][3] - original[p][3]).norm();
+              this->pcout << out.str() << std::endl;
+            }
+        }
+      else
+        this->pcout << "[SHARP-TEMP] force_feedback baseline newton="
+                    << this->get_current_newton_iteration() << std::endl;
+    }
+  catch (...)
+    {
+      restore();
+      throw;
+    }
+  restore();
+  debug_previous_force_solution.reinit(this->locally_owned_dofs,
+                                       this->mpi_communicator);
+  debug_previous_force_solution = saved_solution;
+  debug_previous_force_values   = original;
+  debug_force_baseline_valid    = true;
+  debug_phase("force_feedback_probe", start);
+}
+
+template <int dim>
+void
+FluidDynamicsSharp<dim>::debug_prepare_rhs()
+{
+  ++debug_rhs_calls;
+  if (!debug_base_valid)
+    return;
+  GlobalVectorType delta;
+  delta.reinit(this->locally_owned_dofs, this->mpi_communicator);
+  delta = this->evaluation_point;
+  delta.add(-1., debug_base_solution);
+  debug_trial_norm = delta.l2_norm();
+  // Compare outlet activation at the matrix state and the current trial. This
+  // evaluates only boundary faces and never modifies either solution vector.
+  GlobalVectorType debug_ghost_base;
+  debug_ghost_base.reinit(this->locally_owned_dofs,
+                          this->locally_relevant_dofs,
+                          this->mpi_communicator);
+  debug_ghost_base = debug_base_solution;
+  FEFaceValues<dim>                debug_face(*this->mapping,
+                               *this->fe,
+                               *this->face_quadrature,
+                               update_values | update_normal_vectors |
+                                 update_JxW_values);
+  const FEValuesExtractors::Vector debug_velocity(0);
+  std::vector<Tensor<1, dim>>      base_u(this->face_quadrature->size());
+  std::vector<Tensor<1, dim>>      trial_u(this->face_quadrature->size());
+  double outlet_area = 0., activated_area = 0., deactivated_area = 0.;
+  double stable_remainder = 0., switched_remainder = 0.;
+  for (const auto &cell : this->dof_handler->active_cell_iterators())
+    if (cell->is_locally_owned() && cell->at_boundary())
+      for (const auto face : cell->face_indices())
+        if (cell->face(face)->at_boundary())
+          {
+            const auto  id = cell->face(face)->boundary_id();
+            const auto &types =
+              this->simulation_parameters.boundary_conditions.type;
+            const auto type = types.find(id);
+            if (type == types.end() ||
+                type->second != BoundaryConditions::BoundaryType::outlet)
+              continue;
+            debug_face.reinit(cell, face);
+            debug_face[debug_velocity].get_function_values(debug_ghost_base,
+                                                           base_u);
+            debug_face[debug_velocity].get_function_values(
+              this->evaluation_point, trial_u);
+            for (unsigned int q = 0; q < base_u.size(); ++q)
+              {
+                const auto   n = debug_face.normal_vector(q);
+                const double a = base_u[q] * n, b = trial_u[q] * n;
+                const auto   du        = trial_u[q] - base_u[q];
+                auto         predicted = std::min(a, 0.) * base_u[q];
+                if (a < 0.)
+                  predicted += a * du + (du * n) * base_u[q];
+                const double remainder =
+                  (std::min(b, 0.) * trial_u[q] - predicted).norm();
+                const double area = debug_face.JxW(q);
+                outlet_area += area;
+                if (a >= 0. && b < 0.)
+                  activated_area += area;
+                if (a < 0. && b >= 0.)
+                  deactivated_area += area;
+                if ((a < 0.) != (b < 0.))
+                  switched_remainder += area * remainder;
+                else
+                  stable_remainder += area * remainder;
+              }
+          }
+  this->pcout << "[SHARP-TEMP] outlet_trial rhs_call=" << debug_rhs_calls
+              << " area="
+              << Utilities::MPI::sum(outlet_area, this->mpi_communicator)
+              << " activated_area="
+              << Utilities::MPI::sum(activated_area, this->mpi_communicator)
+              << " deactivated_area="
+              << Utilities::MPI::sum(deactivated_area, this->mpi_communicator)
+              << " stable_flux_remainder_integral="
+              << Utilities::MPI::sum(stable_remainder, this->mpi_communicator)
+              << " switched_flux_remainder_integral="
+              << Utilities::MPI::sum(switched_remainder, this->mpi_communicator)
+              << std::endl;
+
+  // The matrix acts on a pressure-scaled Newton update. Convert the physical
+  // trial displacement back to that convention before testing its prediction.
+  const double pressure_scale =
+    this->simulation_parameters.stabilization.pressure_scaling_factor;
+  for (const auto &[index, component] : debug_components)
+    if (component == dim)
+      delta(index) /= pressure_scale;
+  delta.compress(VectorOperation::insert);
+  this->system_matrix.vmult(debug_prediction, delta);
+  debug_prediction *= -1.;
+  debug_prediction.add(1., debug_base_rhs);
+}
+
+template <int dim>
+void
+FluidDynamicsSharp<dim>::debug_finish_rhs()
+{
+  if (!debug_base_valid)
+    return;
+  // Matrix assembly does not refresh the bulk RHS. Establish the reference
+  // from the first full RHS assembly at the unchanged base solution, otherwise
+  // a stale bulk residual would masquerade as a Jacobian inconsistency.
+  if (debug_rhs_calls == 1 && debug_trial_norm == 0.)
+    {
+      debug_base_rhs = this->system_rhs;
+      this->pcout << "[SHARP-TEMP] captured_fresh_rhs_baseline" << std::endl;
+      for (unsigned int component = 0;
+           component < static_cast<unsigned int>(dim + 1);
+           ++component)
+        {
+          double                  peak = 0.;
+          types::global_dof_index row  = numbers::invalid_dof_index;
+          for (const auto index : this->locally_owned_dofs)
+            if (debug_components.at(index) == component &&
+                std::abs(this->system_rhs(index)) > peak)
+              {
+                peak = std::abs(this->system_rhs(index));
+                row  = index;
+              }
+          const double global_peak =
+            Utilities::MPI::max(peak, this->mpi_communicator);
+          const auto global_row =
+            Utilities::MPI::min(peak == global_peak ?
+                                  row :
+                                  numbers::invalid_dof_index,
+                                this->mpi_communicator);
+          std::string message;
+          if (global_row != numbers::invalid_dof_index &&
+              this->locally_owned_dofs.is_element(global_row))
+            {
+              std::ostringstream out;
+              out << std::scientific << std::setprecision(12)
+                  << "[SHARP-TEMP] fresh_peak_rhs component=" << component
+                  << " row=" << global_row
+                  << " raw_value=" << this->system_rhs(global_row) << " kind="
+                  << (debug_row_kind.count(global_row) ?
+                        debug_row_kind.at(global_row) :
+                        0)
+                  << " physical_value=" << this->evaluation_point(global_row);
+              if (debug_pressure_reference.count(global_row))
+                out << " pressure_reference="
+                    << debug_pressure_reference.at(global_row)
+                    << " reference_value="
+                    << this->evaluation_point(
+                         debug_pressure_reference.at(global_row));
+              message = out.str();
+            }
+          const auto messages =
+            Utilities::MPI::gather(this->mpi_communicator, message);
+          for (const auto &entry : messages)
+            if (!entry.empty())
+              this->pcout << entry << std::endl;
+        }
+      return;
+    }
+  std::vector<double>     defect(9, 0.), change(9, 0.), bad(9, 0.);
+  double                  peak    = 0.;
+  types::global_dof_index peak_id = numbers::invalid_dof_index;
+  for (const auto index : this->locally_owned_dofs)
+    {
+      const auto         it   = debug_row_kind.find(index);
+      const unsigned int kind = it == debug_row_kind.end() ? 0 : it->second;
+      const double       d = this->system_rhs(index) - debug_prediction(index);
+      const double       c = this->system_rhs(index) - debug_base_rhs(index);
+      if (!std::isfinite(d) || !std::isfinite(c))
+        {
+          ++bad[kind];
+          continue;
+        }
+      defect[kind] += d * d;
+      change[kind] += c * c;
+      if (!this->zero_constraints.is_constrained(index) &&
+          !this->nonzero_constraints.is_constrained(index) &&
+          std::abs(d) > peak)
+        {
+          peak    = std::abs(d);
+          peak_id = index;
+        }
+    }
+  Utilities::MPI::sum(defect, this->mpi_communicator, defect);
+  Utilities::MPI::sum(change, this->mpi_communicator, change);
+  Utilities::MPI::sum(bad, this->mpi_communicator, bad);
+  const double global_peak = Utilities::MPI::max(peak, this->mpi_communicator);
+  const auto   global_id =
+    Utilities::MPI::min(peak == global_peak ? peak_id :
+                                              numbers::invalid_dof_index,
+                        this->mpi_communicator);
+  std::ostringstream out;
+  out
+    << std::scientific << std::setprecision(10)
+    << "[SHARP-TEMP] rhs_trial=" << debug_rhs_calls
+    << " physical_delta_l2=" << debug_trial_norm
+    << " max_independent_linearization_defect=" << global_peak
+    << " dof=" << global_id
+    << " row_classes=bulk,touched,interpolation,fallback,dummy_pressure,sharp_affine,sharp_dirichlet,condensed_affine,condensed_dirichlet";
+  for (unsigned int k = 0; k < 9; ++k)
+    out << " class" << k << "_defect_change_nonfinite=" << std::sqrt(defect[k])
+        << ',' << std::sqrt(change[k]) << ',' << bad[k];
+  this->pcout << out.str() << std::endl;
+  std::string detail;
+  if (global_id != numbers::invalid_dof_index &&
+      this->locally_owned_dofs.is_element(global_id))
+    {
+      std::ostringstream row;
+      row << std::scientific << std::setprecision(12)
+          << "[SHARP-TEMP] peak_independent_defect_row=" << global_id
+          << " component=" << debug_components.at(global_id) << " kind="
+          << (debug_row_kind.count(global_id) ? debug_row_kind.at(global_id) :
+                                                0)
+          << " actual_rhs=" << this->system_rhs(global_id)
+          << " base_rhs=" << debug_base_rhs(global_id)
+          << " predicted_rhs=" << debug_prediction(global_id)
+          << " diagonal=" << this->system_matrix.el(global_id, global_id);
+      const auto *entries =
+        this->zero_constraints.get_constraint_entries(global_id);
+      if (entries != nullptr)
+        for (const auto &[master, weight] : *entries)
+          row << " master=" << master << " weight=" << weight
+              << " matrix_coefficient="
+              << this->system_matrix.el(global_id, master);
+      std::vector<types::global_dof_index> indices(this->fe->n_dofs_per_cell());
+      bool                                 found = false;
+      for (const auto &cell : this->dof_handler->active_cell_iterators())
+        {
+          if (cell->is_artificial())
+            continue;
+          cell->get_dof_indices(indices);
+          for (unsigned int j = 0; j < indices.size(); ++j)
+            if (indices[j] == global_id)
+              {
+                row << " position="
+                    << this->get_mapping()->transform_unit_to_real_cell(
+                         cell, this->fe->get_unit_support_points()[j])
+                    << " cell=" << cell->id().to_string();
+                found = true;
+                break;
+              }
+          if (found)
+            break;
+        }
+      detail = row.str();
+    }
+  const auto details = Utilities::MPI::gather(this->mpi_communicator, detail);
+  for (const auto &entry : details)
+    if (!entry.empty())
+      this->pcout << entry << std::endl;
+}
+
+template <int dim>
+void
+FluidDynamicsSharp<dim>::debug_residual(const std::string &phase)
+{
+  if (!debug_components_ready)
+    return;
+  std::vector<double> square(dim + 1, 0.), peak(dim + 1, 0.), bad(dim + 1, 0.);
+  std::vector<double> row_square(9, 0.);
+  for (const auto &[index, component] : debug_components)
+    {
+      const double value = this->system_rhs(index);
+      if (!std::isfinite(value))
+        {
+          ++bad[component];
+          continue;
+        }
+      square[component] += value * value;
+      peak[component] = std::max(peak[component], std::abs(value));
+      const auto it   = debug_row_kind.find(index);
+      row_square[it == debug_row_kind.end() ? 0 : it->second] += value * value;
+    }
+  Utilities::MPI::sum(square, this->mpi_communicator, square);
+  Utilities::MPI::max(peak, this->mpi_communicator, peak);
+  Utilities::MPI::sum(bad, this->mpi_communicator, bad);
+  Utilities::MPI::sum(row_square, this->mpi_communicator, row_square);
+  std::ostringstream out;
+  out << std::scientific << std::setprecision(10)
+      << "[SHARP-TEMP] residual_phase=" << phase
+      << " rhs_call=" << debug_rhs_calls
+      << " scale=" << this->get_residual_rescale_metric();
+  for (unsigned int c = 0; c < square.size(); ++c)
+    out << " component" << c << "_raw_l2_max_nonfinite=" << std::sqrt(square[c])
+        << ',' << peak[c] << ',' << bad[c];
+  out
+    << " raw_row_l2_bulk_touched_interp_fallback_dummy_sharp_affine_sharp_dirichlet_condensed_affine_condensed_dirichlet=";
+  for (const double value : row_square)
+    out << std::sqrt(value) << ',';
+  this->pcout << out.str() << std::endl;
+}
+
+template <int dim>
+void
+FluidDynamicsSharp<dim>::debug_stencils()
+{
+  std::vector<double> values(debug_stencil_counts.begin(),
+                             debug_stencil_counts.end());
+  auto                total = values;
+  Utilities::MPI::sum(values, this->mpi_communicator, total);
+  auto maximum = values;
+  Utilities::MPI::max(values, this->mpi_communicator, maximum);
+  this->pcout
+    << "[SHARP-TEMP] stencils attempted_wrapped_wall_fallback_pressure_overconstrained=";
+  for (unsigned int i = 0; i < 6; ++i)
+    this->pcout << total[i] << ',';
+  this->pcout << " max_reference_cell_extrapolation=" << maximum[6]
+              << " max_abs_stencil_weight=" << maximum[7] << std::endl;
+}
+
+template <int dim>
+void
+FluidDynamicsSharp<dim>::debug_particles(const std::string &phase, bool save)
+{
+  const auto count     = static_cast<unsigned long long>(particles.size());
+  const auto min_count = Utilities::MPI::min(count, this->mpi_communicator);
+  const auto max_count = Utilities::MPI::max(count, this->mpi_communicator);
+  if (min_count != max_count)
+    {
+      this->pcout << "[SHARP-TEMP] ERROR particle counts differ across ranks: "
+                  << min_count << '/' << max_count << std::endl;
+      return;
+    }
+  std::vector<double> state(particles.size() * 9, 0.);
+  unsigned int        nonfinite = 0;
+  double              max_move = 0., max_dv = 0., max_domega = 0.;
+  unsigned int        worst = 0;
+  const auto period = sharp_ib_periodic_boundaries.get_periodic_offset();
+  for (unsigned int p = 0; p < particles.size(); ++p)
+    {
+      double move2 = 0., dv2 = 0., dw2 = 0.;
+      for (int d = 0; d < 3; ++d)
+        {
+          state[9 * p + d]     = d < dim ? particles[p].position[d] : 0.;
+          state[9 * p + 3 + d] = particles[p].velocity[d];
+          state[9 * p + 6 + d] = particles[p].omega[d];
+          if (!save && debug_particle_baseline.size() == state.size())
+            {
+              double dx = state[9 * p + d] - debug_particle_baseline[9 * p + d];
+              if (d < dim && period[d] > 0.)
+                dx -= std::round(dx / period[d]) * period[d];
+              move2 += dx * dx;
+              dv2 += std::pow(state[9 * p + 3 + d] -
+                                debug_particle_baseline[9 * p + 3 + d],
+                              2);
+              dw2 += std::pow(state[9 * p + 6 + d] -
+                                debug_particle_baseline[9 * p + 6 + d],
+                              2);
+            }
+        }
+      if (std::sqrt(dv2) > max_dv)
+        {
+          max_dv = std::sqrt(dv2);
+          worst  = p;
+        }
+      max_move   = std::max(max_move, std::sqrt(move2));
+      max_domega = std::max(max_domega, std::sqrt(dw2));
+    }
+  // Replace nonfinite values only in the diagnostic reduction buffer, never in
+  // the particles. MPI extrema with NaNs are not a reliable consistency check.
+  for (double &value : state)
+    if (!std::isfinite(value))
+      {
+        ++nonfinite;
+        value = 0.;
+      }
+  auto lo = state;
+  Utilities::MPI::min(state, this->mpi_communicator, lo);
+  auto hi = state;
+  Utilities::MPI::max(state, this->mpi_communicator, hi);
+  double disagreement = 0.;
+  for (unsigned int i = 0; i < state.size(); ++i)
+    disagreement = std::max(disagreement, hi[i] - lo[i]);
+  nonfinite = Utilities::MPI::sum(nonfinite, this->mpi_communicator);
+  std::ostringstream out;
+  out << std::scientific << std::setprecision(10)
+      << "[SHARP-TEMP] particles phase=" << phase
+      << " count=" << particles.size() << " rank_disagreement=" << disagreement
+      << " nonfinite_rank_sum=" << nonfinite
+      << " root_max_move_dv_domega=" << max_move << ',' << max_dv << ','
+      << max_domega;
+  if (!particles.empty())
+    {
+      const auto  &p  = particles[worst];
+      const double dt = this->simulation_control->get_time_step();
+      out << " root_worst_dv_particle=" << worst << " mass=" << p.mass
+          << " volume=" << p.volume << " density=" << p.mass / p.volume
+          << " inertia_diag=" << p.inertia[0][0] << ',' << p.inertia[1][1]
+          << ',' << p.inertia[2][2] << " E=" << p.youngs_modulus
+          << " fluid_force_norm=" << p.fluid_forces.norm()
+          << " contact_plus_lubrication_average_force_norm="
+          << p.contact_impulsion.norm() / dt
+          << " fluid_torque_norm=" << p.fluid_torque.norm()
+          << " contact_plus_lubrication_average_torque_norm="
+          << p.omega_contact_impulsion.norm() / dt;
+      if (!save && debug_velocity_inverse.size() == particles.size())
+        out << " inverse_velocity_relaxation=" << debug_velocity_inverse[worst];
+      if (!save && debug_omega_inverse.size() == particles.size())
+        out << " inverse_omega_relaxation=" << debug_omega_inverse[worst];
+      out << " DEM_substeps="
+          << this->simulation_parameters.particlesParameters->coupling_frequency
+          << " dt=" << dt << " particle_alpha="
+          << this->simulation_parameters.particlesParameters->alpha;
+    }
+  const bool debug_only_spheres =
+    std::all_of(particles.begin(), particles.end(), [](const auto &particle) {
+      return dynamic_cast<const Sphere<dim> *>(particle.shape.get()) != nullptr;
+    });
+  if (debug_only_spheres && particles.size() > 1)
+    {
+      double       gap      = std::numeric_limits<double>::max();
+      unsigned int overlaps = 0, first = 0, second = 0;
+      for (unsigned int i = 0; i < particles.size(); ++i)
+        for (unsigned int j = 0; j < i; ++j)
+          {
+            auto delta = particles[i].position - particles[j].position;
+            for (int d = 0; d < dim; ++d)
+              if (period[d] > 0.)
+                delta[d] -= std::round(delta[d] / period[d]) * period[d];
+            const double distance =
+              delta.norm() - particles[i].radius - particles[j].radius;
+            if (distance < 0.)
+              ++overlaps;
+            if (distance < gap)
+              {
+                gap    = distance;
+                first  = j;
+                second = i;
+              }
+          }
+      out << " root_sphere_pair_min_gap=" << gap << " pair=" << first << ','
+          << second << " overlaps=" << overlaps;
+    }
+  this->pcout << out.str() << std::endl;
+  if (save)
+    debug_particle_baseline = state;
+}
+// SHARP-TEMPORARY-DEBUG-BOTTOM
+
 // Constructor for class FluidDynamicsSharp
 template <int dim>
 FluidDynamicsSharp<dim>::FluidDynamicsSharp(
@@ -352,9 +1068,34 @@ FluidDynamicsSharp<dim>::generate_cut_cells_map()
                   const auto face = cell->face(f);
                   if (face->at_boundary())
                     {
+                      // SHARP-TEMPORARY-DEBUG-TOP
+                      // Experimental isolation: outlet conditions are weak,
+                      // so test classification without counting those DoFs
+                      // as constrained merely because they lie on a boundary.
+                      if (std::getenv("SHARP_DEBUG_EXCLUDE_OUTLET_OVERCONSTRAINT") !=
+                          nullptr)
+                        {
+                          const auto &types =
+                            this->simulation_parameters.boundary_conditions.type;
+                          const auto boundary_type = types.find(face->boundary_id());
+                          if (boundary_type != types.end() &&
+                              boundary_type->second ==
+                                BoundaryConditions::BoundaryType::outlet)
+                            continue;
+                        }
+                      // SHARP-TEMPORARY-DEBUG-BOTTOM
                       face->get_dof_indices(local_face_dof_indices);
                       for (const auto &id : local_face_dof_indices)
                         {
+                          // SHARP-TEMPORARY-DEBUG-TOP
+                          // Compare geometric boundary marking with marking
+                          // only DoFs that carry actual affine constraints.
+                          if (std::getenv("SHARP_DEBUG_CONSTRAINED_BOUNDARY_ONLY") !=
+                                nullptr &&
+                              !this->zero_constraints.is_constrained(id) &&
+                              !this->nonzero_constraints.is_constrained(id))
+                            continue;
+                          // SHARP-TEMPORARY-DEBUG-BOTTOM
                           local_dof_overconstrained(id) = 1;
                         }
                     }
@@ -2559,6 +3300,52 @@ FluidDynamicsSharp<dim>::integrate_particles()
                  particles[p].fluid_forces + gravity_buoyancy_force) /
                 particles[p].mass;
 
+              // SHARP-TEMPORARY-DEBUG-TOP
+              const auto debug_fluid_acceleration =
+                particles[p].fluid_forces / particles[p].mass;
+              const auto debug_contact_acceleration =
+                particles[p].contact_impulsion / (dt * particles[p].mass);
+              const auto debug_gravity_acceleration =
+                gravity_buoyancy_force / particles[p].mass;
+              debug_previous_fluid_acceleration.resize(particles.size());
+              debug_previous_contact_acceleration.resize(particles.size());
+              debug_previous_gravity_acceleration.resize(particles.size());
+              if (this->get_current_newton_iteration() > 0)
+                {
+                  const auto dv =
+                    particles[p].velocity - particles[p].velocity_iter;
+                  const auto dr =
+                    residual_velocity - particles[p].previous_velocity_residual;
+                  const auto df = debug_fluid_acceleration -
+                                  debug_previous_fluid_acceleration[p];
+                  const auto dc = debug_contact_acceleration -
+                                  debug_previous_contact_acceleration[p];
+                  const auto dg = debug_gravity_acceleration -
+                                  debug_previous_gravity_acceleration[p];
+                  const double       dv2 = dv.norm_square();
+                  std::ostringstream out;
+                  out << std::scientific << std::setprecision(12)
+                      << "[SHARP-TEMP] secant_budget newton="
+                      << this->get_current_newton_iteration()
+                      << " particle=" << p << " bdf0=" << bdf_coefs[0]
+                      << " delta_fluid_acceleration=" << df
+                      << " delta_contact_acceleration=" << dc
+                      << " delta_gravity_acceleration=" << dg
+                      << " closure_error="
+                      << (dr + bdf_coefs[0] * dv - df - dc - dg).norm()
+                      << " dv_squared=" << dv2 << " fluid_projected_slope="
+                      << (dv2 > 0. ? scalar_product(dv, df) / dv2 : 0.)
+                      << " contact_projected_slope="
+                      << (dv2 > 0. ? scalar_product(dv, dc) / dv2 : 0.);
+                  this->pcout << out.str() << std::endl;
+                }
+              debug_previous_fluid_acceleration[p] = debug_fluid_acceleration;
+              debug_previous_contact_acceleration[p] =
+                debug_contact_acceleration;
+              debug_previous_gravity_acceleration[p] =
+                debug_gravity_acceleration;
+              // SHARP-TEMPORARY-DEBUG-BOTTOM
+
               double inverse_of_relaxation_coefficient_velocity =
                 -bdf_coefs[0] -
                 0.5 * volume * fluid_density / particles[p].mass / dt + DBL_MIN;
@@ -2579,6 +3366,12 @@ FluidDynamicsSharp<dim>::integrate_particles()
                            (vector_of_residual_variation.norm_square()) +
                          DBL_MIN);
                 }
+              // SHARP-TEMPORARY-DEBUG-TOP
+              if (debug_velocity_inverse.size() != particles.size())
+                debug_velocity_inverse.resize(particles.size());
+              debug_velocity_inverse[p] =
+                inverse_of_relaxation_coefficient_velocity;
+              // SHARP-TEMPORARY-DEBUG-BOTTOM
               // Relaxation parameter for the particle dynamics.
               double local_alpha = 1.;
               // We keep in memory the state of the particle before the update
@@ -2646,6 +3439,36 @@ FluidDynamicsSharp<dim>::integrate_particles()
                   particles[p].position = ib_dem.dem_particles[p].position;
                   particles[p].set_position(particles[p].position);
                 }
+
+              // SHARP-TEMPORARY-DEBUG-TOP
+              Tensor<1, dim> debug_position_equation;
+              for (unsigned int d = 0; d < dim; ++d)
+                {
+                  debug_position_equation[d] =
+                    bdf_coefs[0] * particles[p].position[d] -
+                    particles[p].velocity[d];
+                  for (unsigned int i = 1;
+                       i <= number_of_previous_solutions(method);
+                       ++i)
+                    debug_position_equation[d] +=
+                      bdf_coefs[i] * particles[p].previous_positions[i - 1][d];
+                }
+              std::ostringstream debug_consistency;
+              debug_consistency
+                << std::scientific << std::setprecision(12)
+                << "[SHARP-TEMP] particle_consistency newton="
+                << this->get_current_newton_iteration() << " particle=" << p
+                << " position_bdf_velocity_defect=" << debug_position_equation
+                << " dem_vs_corrected_velocity="
+                << (ib_dem.dem_particles[p].velocity - particles[p].velocity)
+                << " frozen_force_residual_after="
+                << (residual_velocity -
+                    bdf_coefs[0] *
+                      (particles[p].velocity - save_particle_state.velocity))
+                     .norm()
+                << " actual_residual_before=" << residual_velocity.norm();
+              this->pcout << debug_consistency.str() << std::endl;
+              // SHARP-TEMPORARY-DEBUG-BOTTOM
 
               // Test the normalized geometry without changing the integration
               // frame. All motion modes are normalized together below.
@@ -2747,6 +3570,11 @@ FluidDynamicsSharp<dim>::integrate_particles()
                            (vector_of_residual_variation.norm_square()) +
                          DBL_MIN);
                 }
+              // SHARP-TEMPORARY-DEBUG-TOP
+              if (debug_omega_inverse.size() != particles.size())
+                debug_omega_inverse.resize(particles.size());
+              debug_omega_inverse[p] = inverse_of_relaxation_coefficient_omega;
+              // SHARP-TEMPORARY-DEBUG-BOTTOM
               // Define the correction vector. And check if it is not NAN. NAN
               // happen when the residual tends to zero in cases where the fluid
               // density is 0.
@@ -2763,6 +3591,49 @@ FluidDynamicsSharp<dim>::integrate_particles()
                   omega_correction_vector = residual_omega;
                 }
 
+              // SHARP-TEMPORARY-DEBUG-TOP
+              const auto debug_dv =
+                particles[p].velocity_iter - save_particle_state.velocity_iter;
+              const auto debug_dr =
+                residual_velocity -
+                save_particle_state.previous_velocity_residual;
+              const auto debug_dw =
+                particles[p].omega - particles[p].omega_iter;
+              const auto debug_drw =
+                residual_omega - particles[p].previous_omega_residual;
+              std::ostringstream debug_particle;
+              debug_particle
+                << std::scientific << std::setprecision(10)
+                << "[SHARP-TEMP] particle_secant step="
+                << this->simulation_control->get_iteration_number()
+                << " newton=" << this->get_current_newton_iteration()
+                << " particle=" << p
+                << " velocity_before=" << save_particle_state.velocity
+                << " velocity_after=" << particles[p].velocity
+                << " velocity_residual=" << residual_velocity
+                << " delta_velocity=" << debug_dv
+                << " delta_residual=" << debug_dr
+                << " secant_dot=" << scalar_product(debug_dv, debug_dr)
+                << " delta_residual_squared=" << debug_dr.norm_square()
+                << " inverse_velocity="
+                << inverse_of_relaxation_coefficient_velocity
+                << " omega_before=" << particles[p].omega
+                << " omega_residual=" << residual_omega
+                << " delta_omega=" << debug_dw
+                << " delta_omega_residual=" << debug_drw
+                << " omega_secant_dot=" << scalar_product(debug_dw, debug_drw)
+                << " inverse_omega=" << inverse_of_relaxation_coefficient_omega
+                << " omega_correction=" << omega_correction_vector * alpha
+                << " fluid_force=" << particles[p].fluid_forces
+                << " contact_lubrication_average="
+                << particles[p].contact_impulsion / dt
+                << " gravity_buoyancy=" << gravity_buoyancy_force
+                << " mass=" << particles[p].mass << " position_from_DEM="
+                << !(particles[p].contact_impulsion.norm() < 1e-12 &&
+                     !this->simulation_parameters.particlesParameters
+                        ->explicit_position_integration_calculation);
+              this->pcout << debug_particle.str() << std::endl;
+              // SHARP-TEMPORARY-DEBUG-BOTTOM
               double local_alpha_omega = 1;
 
               particles[p].omega_iter = particles[p].omega;
@@ -3550,10 +4421,26 @@ template <int dim>
 void
 FluidDynamicsSharp<dim>::sharp_edge()
 {
+  // SHARP-TEMPORARY-DEBUG-TOP
+  // Optional experiment: synchronize any outstanding additive RHS writes
+  // collectively before Sharp replaces selected entries.
+  if (std::getenv("SHARP_DEBUG_SYNC_RHS") != nullptr)
+    this->system_rhs.compress(VectorOperation::add);
+  const auto debug_previous_pressure_reference = debug_pressure_reference;
+  debug_pressure_reference.clear();
+  const auto debug_previous_rows = debug_row_kind;
+  debug_row_kind.clear();
+  debug_stencil_counts.fill(0.);
+  // SHARP-TEMPORARY-DEBUG-BOTTOM
+
   // This function defines an Immersed Boundary based on the sharp edge method
   // on a solid of dim=2 or dim=3
 
   TimerOutput::Scope t(this->computing_timer, "Assemble sharp");
+  // SHARP-TEMPORARY-DEBUG-TOP
+  try
+    {
+  // SHARP-TEMPORARY-DEBUG-BOTTOM
   using dealii::numbers::PI;
   std::vector<typename DoFHandler<dim>::active_cell_iterator> active_neighbors;
   std::vector<typename DoFHandler<dim>::active_cell_iterator>
@@ -3813,6 +4700,10 @@ FluidDynamicsSharp<dim>::sharp_edge()
               for (unsigned int i = 0; i < local_dof_indices.size(); ++i)
                 {
                   unsigned int global_index_overwrite = local_dof_indices[i];
+                  // SHARP-TEMPORARY-DEBUG-TOP
+                  debug_row_kind.try_emplace(global_index_overwrite, 1);
+                  // SHARP-TEMPORARY-DEBUG-BOTTOM
+
                   const unsigned int cache_particle_id =
                     periodic_frame_index != 0 ? ib_particle_id : 0;
                   const PeriodicFrameDofCacheKey stencil_cache_key = {
@@ -3845,6 +4736,20 @@ FluidDynamicsSharp<dim>::sharp_edge()
                           this->locally_owned_dofs.is_element(
                             global_index_overwrite))
                         {
+                          // SHARP-TEMPORARY-DEBUG-TOP
+                          const auto *debug_entries =
+                            this->nonzero_constraints.get_constraint_entries(
+                              global_index_overwrite);
+                          if (debug_entries == nullptr)
+                            debug_entries =
+                              this->zero_constraints.get_constraint_entries(
+                                global_index_overwrite);
+                          debug_row_kind[global_index_overwrite] =
+                            debug_entries != nullptr &&
+                                !debug_entries->empty() ?
+                              5 :
+                              6;
+                          // SHARP-TEMPORARY-DEBUG-BOTTOM
                           if (this->zero_constraints.is_constrained(
                                 local_dof_indices[i]))
                             {
@@ -4010,6 +4915,29 @@ FluidDynamicsSharp<dim>::sharp_edge()
                                   stencil_cell = this->dof_handler->end();
                                 }
                             }
+                          // SHARP-TEMPORARY-DEBUG-TOP
+                          ++debug_stencil_counts[0];
+                          if (stencil_periodic_shift.norm_square() > 0.)
+                            ++debug_stencil_counts[1];
+                          if (stencil_cell == this->dof_handler->end())
+                            {
+                              ++debug_stencil_counts[2];
+                              if (std::getenv("SHARP_DEBUG_STENCIL_FALLBACK") !=
+                                  nullptr)
+                                std::cerr
+                                  << "[SHARP-TEMP] stencil_fallback rank="
+                                  << Utilities::MPI::this_mpi_process(
+                                       this->mpi_communicator)
+                                  << " row=" << global_index_overwrite
+                                  << " particle=" << ib_particle_id
+                                  << " particle_position="
+                                  << particles[ib_particle_id].position
+                                  << " support_point="
+                                  << support_points[local_dof_indices[i]]
+                                  << " search_point=" << point_to_find_cell
+                                  << std::endl;
+                            }
+                          // SHARP-TEMPORARY-DEBUG-BOTTOM
                           if (stencil_cell == this->dof_handler->end())
                             {
                               // Preserve the nonperiodic wall fallback.
@@ -4027,6 +4955,10 @@ FluidDynamicsSharp<dim>::sharp_edge()
                                                         stencil_periodic_shift};
 
                           bool skip_stencil = false;
+                          // SHARP-TEMPORARY-DEBUG-TOP
+                          debug_row_kind[global_index_overwrite] = 2;
+                          // SHARP-TEMPORARY-DEBUG-BOTTOM
+
 
                           // Check if the DOF intersect the IB
                           bool dof_on_ib = false;
@@ -4074,6 +5006,15 @@ FluidDynamicsSharp<dim>::sharp_edge()
                                                       global_index_overwrite,
                                                       sum_line);
                               skip_stencil = true;
+                              // SHARP-TEMPORARY-DEBUG-TOP
+                              debug_row_kind[global_index_overwrite] = 3;
+                              ++debug_stencil_counts[3];
+                              if (use_ib_for_pressure)
+                                ++debug_stencil_counts[4];
+                              if (cell2_is_overconstrained)
+                                ++debug_stencil_counts[5];
+                              // SHARP-TEMPORARY-DEBUG-BOTTOM
+
 
                               // Tolerance to define an intersection of
                               // the DOF and IB
@@ -4135,6 +5076,18 @@ FluidDynamicsSharp<dim>::sharp_edge()
                                 }
                             }
 
+                          // SHARP-TEMPORARY-DEBUG-TOP
+                          for (const auto &debug_point :
+                               unite_cell_interpolation_points)
+                            debug_stencil_counts[6] =
+                              std::max(debug_stencil_counts[6],
+                                       GeometryInfo<dim>::distance_to_unit_cell(
+                                         debug_point));
+                          for (const auto debug_weight : ib_coef)
+                            debug_stencil_counts[7] =
+                              std::max(debug_stencil_counts[7],
+                                       std::abs(debug_weight));
+                          // SHARP-TEMPORARY-DEBUG-BOTTOM
                           std::vector<double> local_interp_sol(ib_coef.size());
 
                           // Define the new matrix entry for this dof
@@ -4231,6 +5184,11 @@ FluidDynamicsSharp<dim>::sharp_edge()
                                     {
                                       v_ib = this->evaluation_point(
                                         local_dof_indices[k]);
+                                      // SHARP-TEMPORARY-DEBUG-TOP
+                                      debug_pressure_reference
+                                        [global_index_overwrite] =
+                                          local_dof_indices[k];
+                                      // SHARP-TEMPORARY-DEBUG-BOTTOM
                                       add_matrix_entry_with_periodic_expansion(
                                         global_index_overwrite,
                                         local_dof_indices[k],
@@ -4356,6 +5314,9 @@ FluidDynamicsSharp<dim>::sharp_edge()
                                     sum_line);
                                   auto &system_rhs = this->system_rhs;
                                   system_rhs(global_index_overwrite) = 0;
+                                  // SHARP-TEMPORARY-DEBUG-TOP
+                                  debug_row_kind[global_index_overwrite] = 4;
+                                  // SHARP-TEMPORARY-DEBUG-BOTTOM
                                 }
                             }
                         }
@@ -4370,8 +5331,92 @@ FluidDynamicsSharp<dim>::sharp_edge()
         }
     }
 
+  // SHARP-TEMPORARY-DEBUG-TOP
+  std::array<unsigned int, 9> debug_local_row_counts{};
+  for (const auto &[index, kind] : debug_row_kind)
+    if (this->locally_owned_dofs.is_element(index) &&
+        kind < debug_local_row_counts.size())
+      ++debug_local_row_counts[kind];
+  std::ostringstream debug_rank_rows;
+  debug_rank_rows << "[SHARP-TEMP] pre_rhs_compress rank="
+                  << Utilities::MPI::this_mpi_process(this->mpi_communicator)
+                  << " owned=" << this->locally_owned_dofs.n_elements()
+                  << " row_kind_counts=";
+  for (const auto count : debug_local_row_counts)
+    debug_rank_rows << count << ',';
+  std::cerr << debug_rank_rows.str() << std::endl;
+  if (std::getenv("SHARP_DEBUG_PRECOMPRESS_BARRIER") != nullptr)
+    {
+      MPI_Barrier(this->mpi_communicator);
+      std::cerr << "[SHARP-TEMP] pre_rhs_barrier_passed rank="
+                << Utilities::MPI::this_mpi_process(this->mpi_communicator)
+                << std::endl;
+    }
+  // SHARP-TEMPORARY-DEBUG-BOTTOM
   this->system_rhs.compress(VectorOperation::insert);
   this->system_matrix.compress(VectorOperation::add);
+  // SHARP-TEMPORARY-DEBUG-TOP
+  // Distinguish condensed constraint rows from physical bulk equations.
+  for (const auto row : this->locally_owned_dofs)
+    if (this->zero_constraints.is_constrained(row) &&
+        (!debug_row_kind.count(row) || debug_row_kind.at(row) < 5))
+      {
+        const auto *entries =
+          this->zero_constraints.get_constraint_entries(row);
+        debug_row_kind[row] = entries != nullptr && !entries->empty() ? 7 : 8;
+      }
+  std::vector<double> debug_reference_changes(3, 0.);
+  for (const auto &[row, reference] : debug_pressure_reference)
+    if (this->locally_owned_dofs.is_element(row))
+      {
+        const auto old = debug_previous_pressure_reference.find(row);
+        if (old == debug_previous_pressure_reference.end())
+          ++debug_reference_changes[0];
+        else if (old->second != reference)
+          ++debug_reference_changes[1];
+      }
+  for (const auto &[row, reference] : debug_previous_pressure_reference)
+    if (this->locally_owned_dofs.is_element(row) &&
+        !debug_pressure_reference.count(row))
+      ++debug_reference_changes[2];
+  Utilities::MPI::sum(debug_reference_changes,
+                      this->mpi_communicator,
+                      debug_reference_changes);
+  this->pcout << "[SHARP-TEMP] pressure_reference_added_switched_removed="
+              << debug_reference_changes[0] << ',' << debug_reference_changes[1]
+              << ',' << debug_reference_changes[2] << std::endl;
+  debug_stencils();
+  std::vector<double> debug_transitions(81, 0.);
+  for (const auto row : this->locally_owned_dofs)
+    {
+      const unsigned int old_kind =
+        debug_previous_rows.count(row) ? debug_previous_rows.at(row) : 0;
+      const unsigned int new_kind =
+        debug_row_kind.count(row) ? debug_row_kind.at(row) : 0;
+      if (old_kind != new_kind)
+        ++debug_transitions[9 * old_kind + new_kind];
+    }
+  Utilities::MPI::sum(debug_transitions,
+                      this->mpi_communicator,
+                      debug_transitions);
+  this->pcout << "[SHARP-TEMP] row_kind_changes rhs_call=" << debug_rhs_calls;
+  for (unsigned int old_kind = 0; old_kind < 9; ++old_kind)
+    for (unsigned int new_kind = 0; new_kind < 9; ++new_kind)
+      if (debug_transitions[9 * old_kind + new_kind] > 0.)
+        this->pcout << " " << old_kind << "->" << new_kind << ':'
+                    << debug_transitions[9 * old_kind + new_kind];
+  this->pcout << std::endl;
+  // SHARP-TEMPORARY-DEBUG-BOTTOM
+  // SHARP-TEMPORARY-DEBUG-TOP
+    }
+  catch (const std::exception &exception)
+    {
+      std::cerr << "[SHARP-TEMP] sharp_exception rank="
+                << Utilities::MPI::this_mpi_process(this->mpi_communicator)
+                << " message=" << exception.what() << std::endl;
+      throw;
+    }
+  // SHARP-TEMPORARY-DEBUG-BOTTOM
 }
 
 
@@ -5499,11 +6544,32 @@ template <int dim>
 void
 FluidDynamicsSharp<dim>::setup_dofs_fd()
 {
+  // SHARP-TEMPORARY-DEBUG-TOP
+  debug_force_baseline_valid = false;
+  debug_base_valid           = false;
+  debug_components_ready     = false;
+  debug_components.clear();
+  debug_pressure_reference.clear();
+  debug_row_kind.clear();
+  // SHARP-TEMPORARY-DEBUG-BOTTOM
+
   // DoF redistribution also invalidates cached cells without a mesh change.
   periodic_stencil_search.reinit(*this->dof_handler);
   // Call the base class to do all standard setup (DoF distribution,
   // constraints, vector reinit, sparsity pattern, matrix reinit).
   FluidDynamicsMatrixBased<dim>::setup_dofs_fd();
+
+  // SHARP-TEMPORARY-DEBUG-TOP
+  // Experimental control: test whether Sharp's ghost stencil columns require
+  // constraints communicated from their owning ranks before graph assembly.
+  if (std::getenv("SHARP_DEBUG_SYNC_CONSTRAINTS") != nullptr)
+    {
+      this->zero_constraints.make_consistent_in_parallel(
+        this->locally_owned_dofs, this->locally_relevant_dofs, this->mpi_communicator);
+      this->nonzero_constraints.make_consistent_in_parallel(
+        this->locally_owned_dofs, this->locally_relevant_dofs, this->mpi_communicator);
+    }
+  // SHARP-TEMPORARY-DEBUG-BOTTOM
 
   // If periodic boundaries are not enabled, the standard sparsity
   // pattern (built with keep_constrained_dofs=false) is sufficient.
@@ -5548,6 +6614,19 @@ FluidDynamicsSharp<dim>::setup_dofs_fd()
         }
     }
 
+  // SHARP-TEMPORARY-DEBUG-TOP
+  // Small-case isolation experiment only: a complete locally relevant graph
+  // tests whether absent stencil entries cause the matrix insertion failure.
+  // This is intentionally not a scalable production sparsity construction.
+  if (std::getenv("SHARP_DEBUG_DENSE_RELEVANT_GRAPH") != nullptr)
+    {
+      AssertThrow(this->dof_handler->n_dofs() <= 10000,
+                  ExcMessage("Dense diagnostic graph is restricted to small cases."));
+      for (const auto row : this->locally_owned_dofs)
+        for (const auto column : this->locally_relevant_dofs)
+          dsp.add(row, column);
+    }
+  // SHARP-TEMPORARY-DEBUG-BOTTOM
   SparsityTools::distribute_sparsity_pattern(
     dsp,
     this->dof_handler->locally_owned_dofs(),
@@ -5749,7 +6828,23 @@ FluidDynamicsSharp<dim>::add_matrix_entry_with_periodic_expansion(
 
   if (!col_is_constrained)
     {
+      // SHARP-TEMPORARY-DEBUG-TOP
+      try
+        {
+      // SHARP-TEMPORARY-DEBUG-BOTTOM
       this->system_matrix.add(row_dof, col_dof, value);
+      // SHARP-TEMPORARY-DEBUG-TOP
+        }
+      catch (const std::exception &)
+        {
+          std::cerr << "[SHARP-TEMP] missing_matrix_entry rank="
+                    << Utilities::MPI::this_mpi_process(this->mpi_communicator)
+                    << " row=" << row_dof << " requested_column=" << col_dof
+                    << " actual_column=" << col_dof << " value=" << value
+                    << std::endl;
+          throw;
+        }
+      // SHARP-TEMPORARY-DEBUG-BOTTOM
     }
   else
     {
@@ -5769,12 +6864,44 @@ FluidDynamicsSharp<dim>::add_matrix_entry_with_periodic_expansion(
             {
               const types::global_dof_index master_col = entry.first;
               const double                  weight     = entry.second;
+              // SHARP-TEMPORARY-DEBUG-TOP
+              try
+                {
+              // SHARP-TEMPORARY-DEBUG-BOTTOM
               this->system_matrix.add(row_dof, master_col, weight * value);
+              // SHARP-TEMPORARY-DEBUG-TOP
+                }
+              catch (const std::exception &)
+                {
+                  std::cerr << "[SHARP-TEMP] missing_matrix_entry rank="
+                            << Utilities::MPI::this_mpi_process(this->mpi_communicator)
+                            << " row=" << row_dof << " requested_column=" << col_dof
+                            << " actual_column=" << master_col << " value=" << value
+                            << std::endl;
+                  throw;
+                }
+              // SHARP-TEMPORARY-DEBUG-BOTTOM
             }
         }
       else
         {
+          // SHARP-TEMPORARY-DEBUG-TOP
+          try
+            {
+          // SHARP-TEMPORARY-DEBUG-BOTTOM
           this->system_matrix.add(row_dof, col_dof, value);
+          // SHARP-TEMPORARY-DEBUG-TOP
+            }
+          catch (const std::exception &)
+            {
+              std::cerr << "[SHARP-TEMP] missing_matrix_entry rank="
+                        << Utilities::MPI::this_mpi_process(this->mpi_communicator)
+                        << " row=" << row_dof << " requested_column=" << col_dof
+                        << " actual_column=" << col_dof << " value=" << value
+                        << std::endl;
+              throw;
+            }
+          // SHARP-TEMPORARY-DEBUG-BOTTOM
         }
     }
 }
