@@ -21,6 +21,7 @@
 #include <deal.II/base/conditional_ostream.h>
 
 #include <array>
+#include <cstdlib>
 #include <iostream>
 // SHARP-TEMPORARY-DEBUG-BOTTOM
 
@@ -418,6 +419,11 @@ IBParticlesDEM<dim>::calculate_pp_contact_force(
               if (normal_overlap > 0)
                 // This means that the adjacent particles are in contact
                 {
+                  // SHARP-TEMPORARY-DEBUG-TOP
+                  if (std::getenv("SHARP_DEBUG_DEM_SENSITIVITY") != nullptr)
+                    ++debug_particle_contact_stages[
+                      {particle_one.particle_id, particle_two.particle_id}];
+                  // SHARP-TEMPORARY-DEBUG-BOTTOM
                   double contact_radius_particle_one;
                   double contact_radius_particle_two;
                   if (parameters->approximate_radius_for_contact)
@@ -584,6 +590,9 @@ IBParticlesDEM<dim>::calculate_pp_lubrication_force(
                   radial_velocity =
                     scalar_product(-radial_vector, particle_one.velocity) +
                     scalar_product(radial_vector, particle_two.velocity);
+                  // The velocity projection is onto the unit separation
+                  // vector, not the separation vector itself.
+                  radial_velocity /= radial_vector.norm();
                   f_lub =
                     3. / 2. * PI * mu *
                       (particle_one.radius * 2 * particle_two.radius * 2 /
@@ -920,6 +929,11 @@ IBParticlesDEM<dim>::calculate_pw_contact_force(
 
               if (normal_overlap > 0)
                 {
+                  // SHARP-TEMPORARY-DEBUG-TOP
+                  if (std::getenv("SHARP_DEBUG_DEM_SENSITIVITY") != nullptr)
+                    ++debug_wall_contact_stages[
+                      {particle.particle_id, boundary_cell.boundary_index}];
+                  // SHARP-TEMPORARY-DEBUG-BOTTOM
                   // Evaluates the curvature radius at the
                   // contact point.
                   double contact_radius_particle_one;
@@ -1159,11 +1173,14 @@ IBParticlesDEM<dim>::calculate_pw_lubrication_force(
                   radial_velocity =
                     scalar_product(-radial_vector,
                                    particle.velocity - wall_velocity_at_point);
-                  f_lub = 3. / 2. * PI * mu * (particle.radius) *
-                            (particle.radius) / gap * radial_velocity *
+                  radial_velocity /= radial_vector.norm();
+                  // The infinite-wall-radius limit uses the particle diameter.
+                  const double diameter = 2. * particle.radius;
+                  f_lub = 3. / 2. * PI * mu * diameter *
+                            diameter / gap * radial_velocity *
                             radial_vector / radial_vector.norm() -
-                          3. / 2. * PI * mu * (particle.radius) *
-                            (particle.radius) / h_max * radial_velocity *
+                          3. / 2. * PI * mu * diameter *
+                            diameter / h_max * radial_velocity *
                             radial_vector / radial_vector.norm();
 
                   // A particle can be close to several walls: the force of
@@ -1379,10 +1396,35 @@ IBParticlesDEM<dim>::calculate_force_model(
   Tensor<1, 3> omega_ij           = particle_one_omega - particle_two_omega;
   Tensor<1, 3> omega_ij_direction = omega_ij / (omega_ij.norm() + DBL_MIN);
 
+  // SHARP-TEMPORARY-DEBUG-TOP
+  // Diagnostic only: smooth the rolling-torque direction near zero spin.
+  // This changes the force law and is not a proposed production parameter.
+  if (const char *text = std::getenv("SHARP_DEBUG_ROLLING_SMOOTH"))
+    {
+      const double scale = std::atof(text);
+      if (scale > 0.)
+        omega_ij_direction = omega_ij / std::hypot(omega_ij.norm(), scale);
+    }
+  // SHARP-TEMPORARY-DEBUG-BOTTOM
+
   // Calculation of the linear rolling resistance torque
   rolling_resistance_torque =
     (-effective_coefficient_of_rolling_friction * effective_radius *
      normal_force.norm() * omega_ij_direction);
+  // SHARP-TEMPORARY-DEBUG-TOP
+  if (std::getenv("SHARP_DEBUG_DEM_SENSITIVITY") != nullptr)
+    {
+      const std::array<double, 4> limits = {{1e-12, 1e-6, 1e-3, 1.}};
+      for (unsigned int i = 0; i < limits.size(); ++i)
+        if (omega_ij.norm() < limits[i])
+          {
+            ++debug_small_relative_omega_counts[i];
+            debug_small_relative_omega_max_torque[i] =
+              std::max(debug_small_relative_omega_max_torque[i],
+                       rolling_resistance_torque.norm());
+          }
+    }
+  // SHARP-TEMPORARY-DEBUG-BOTTOM
 }
 
 template <int dim>
@@ -1394,6 +1436,10 @@ IBParticlesDEM<dim>::integrate_particles_motion(const double dt,
                                                 const double mu)
 {
   // SHARP-TEMPORARY-DEBUG-TOP
+  debug_particle_contact_stages.clear();
+  debug_wall_contact_stages.clear();
+  debug_small_relative_omega_counts.fill(0);
+  debug_small_relative_omega_max_torque.fill(0.);
   unsigned int                       debug_stages = 0;
   std::vector<std::array<double, 4>> debug_force_peaks(dem_particles.size());
   // SHARP-TEMPORARY-DEBUG-BOTTOM

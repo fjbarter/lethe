@@ -19,6 +19,11 @@
 #include <set>
 #include <vector>
 
+// SHARP-TEMPORARY-DEBUG-TOP
+#include <array>
+#include <utility>
+// SHARP-TEMPORARY-DEBUG-BOTTOM
+
 using namespace dealii;
 
 namespace Parameters
@@ -307,6 +312,15 @@ public:
 
 
   std::vector<IBParticle<dim>> dem_particles;
+
+  // SHARP-TEMPORARY-DEBUG-TOP
+  std::map<std::pair<unsigned int, unsigned int>, unsigned int>
+    debug_particle_contact_stages;
+  std::map<std::pair<unsigned int, types::boundary_id>, unsigned int>
+    debug_wall_contact_stages;
+  std::array<unsigned int, 4> debug_small_relative_omega_counts = {};
+  std::array<double, 4> debug_small_relative_omega_max_torque = {};
+  // SHARP-TEMPORARY-DEBUG-BOTTOM
 
   /**
    * @brief Return the particle-particle contact map built for the IB DEM

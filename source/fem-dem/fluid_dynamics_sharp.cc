@@ -53,6 +53,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <sstream>
+#include <type_traits>
 // SHARP-TEMPORARY-DEBUG-BOTTOM
 
 // SHARP-TEMPORARY-DEBUG-TOP
@@ -354,6 +355,10 @@ FluidDynamicsSharp<dim>::debug_prepare_rhs()
   std::vector<Tensor<1, dim>>      trial_u(this->face_quadrature->size());
   double outlet_area = 0., activated_area = 0., deactivated_area = 0.;
   double stable_remainder = 0., switched_remainder = 0.;
+  const bool debug_check_outlet_assembler =
+    std::getenv("SHARP_DEBUG_OUTLET_FACE_FD") != nullptr &&
+    this->get_current_newton_iteration() == 20 && debug_trial_norm > 0.;
+  std::array<double, 6> debug_face_fd = {};
   for (const auto &cell : this->dof_handler->active_cell_iterators())
     if (cell->is_locally_owned() && cell->at_boundary())
       for (const auto face : cell->face_indices())
@@ -392,7 +397,91 @@ FluidDynamicsSharp<dim>::debug_prepare_rhs()
                 else
                   stable_remainder += area * remainder;
               }
+            if (debug_check_outlet_assembler)
+              {
+                // Exercise the actual outlet assembler on this face, keeping
+                // switched and unchanged quadrature points in separate sums.
+                NavierStokesScratchData<dim> scratch(
+                  this->simulation_control,
+                  this->simulation_parameters.physical_properties_manager,
+                  *this->fe,
+                  *this->cell_quadrature,
+                  *this->mapping,
+                  *this->face_quadrature);
+                scratch.fe_face_values.reinit(cell, face);
+                scratch.n_faces = cell->n_faces();
+                scratch.n_faces_q_points = base_u.size();
+                scratch.is_boundary_cell = true;
+                scratch.is_boundary_face.assign(scratch.n_faces, false);
+                scratch.is_boundary_face[face] = true;
+                scratch.boundary_face_id.resize(scratch.n_faces);
+                scratch.boundary_face_id[face] = id;
+                scratch.fe_values.reinit(cell);
+                scratch.cell_size = compute_cell_diameter<dim>(
+                  compute_cell_measure_with_JxW(scratch.fe_values.get_JxW_values()),
+                  this->fe->degree);
+                const unsigned int n_dofs = this->fe->n_dofs_per_cell();
+                scratch.face_JxW.reinit(scratch.n_faces, base_u.size());
+                scratch.face_normal.reinit(scratch.n_faces, base_u.size());
+                scratch.face_phi_u.reinit(scratch.n_faces, base_u.size(), n_dofs);
+                scratch.face_velocity_values.assign(
+                  scratch.n_faces, std::vector<Tensor<1, dim>>(base_u.size()));
+                std::vector<types::global_dof_index> dof_indices(n_dofs);
+                cell->get_dof_indices(dof_indices);
+                Vector<double> face_delta(n_dofs);
+                for (unsigned int j = 0; j < n_dofs; ++j)
+                  face_delta[j] = this->evaluation_point(dof_indices[j]) -
+                                  debug_ghost_base(dof_indices[j]);
+                OutletBoundaryCondition<dim> assembler(
+                  this->simulation_control,
+                  this->simulation_parameters.boundary_conditions);
+                for (unsigned int group = 0; group < 2; ++group)
+                  {
+                    for (unsigned int q = 0; q < base_u.size(); ++q)
+                      {
+                        const auto normal = debug_face.normal_vector(q);
+                        const bool switched = (base_u[q] * normal < 0.) !=
+                                              (trial_u[q] * normal < 0.);
+                        scratch.face_JxW[face][q] =
+                          switched == (group == 1) ? debug_face.JxW(q) : 0.;
+                        scratch.face_normal[face][q] = normal;
+                        scratch.face_velocity_values[face][q] = base_u[q];
+                        for (unsigned int j = 0; j < n_dofs; ++j)
+                          scratch.face_phi_u[face][q][j] =
+                            scratch.fe_face_values[debug_velocity].value(j, q);
+                      }
+                    StabilizedMethodsTensorCopyData<dim> base(
+                      n_dofs, this->cell_quadrature->size());
+                    StabilizedMethodsTensorCopyData<dim> trial(
+                      n_dofs, this->cell_quadrature->size());
+                    assembler.assemble_matrix(scratch, base);
+                    assembler.assemble_rhs(scratch, base);
+                    scratch.face_velocity_values[face] = trial_u;
+                    assembler.assemble_rhs(scratch, trial);
+                    Vector<double> prediction(n_dofs);
+                    base.local_matrix.vmult(prediction, face_delta);
+                    for (unsigned int i = 0; i < n_dofs; ++i)
+                      {
+                        const double actual = base.local_rhs(i) - trial.local_rhs(i);
+                        debug_face_fd[3 * group] += actual * actual;
+                        debug_face_fd[3 * group + 1] += prediction[i] * prediction[i];
+                        debug_face_fd[3 * group + 2] +=
+                          (actual - prediction[i]) * (actual - prediction[i]);
+                      }
+                  }
+              }
           }
+  if (debug_check_outlet_assembler)
+    {
+      std::vector<double> sums(debug_face_fd.begin(), debug_face_fd.end());
+      Utilities::MPI::sum(sums, this->mpi_communicator, sums);
+      this->pcout << "[SHARP-TEMP] outlet_face_fd rhs_call=" << debug_rhs_calls
+                  << " stable_actual_prediction_error=" << std::sqrt(sums[0])
+                  << ',' << std::sqrt(sums[1]) << ',' << std::sqrt(sums[2])
+                  << " switched_actual_prediction_error=" << std::sqrt(sums[3])
+                  << ',' << std::sqrt(sums[4]) << ',' << std::sqrt(sums[5])
+                  << std::endl;
+    }
   this->pcout << "[SHARP-TEMP] outlet_trial rhs_call=" << debug_rhs_calls
               << " area="
               << Utilities::MPI::sum(outlet_area, this->mpi_communicator)
@@ -3227,6 +3316,223 @@ FluidDynamicsSharp<dim>::integrate_particles()
         time);
       if (recompute_contacts)
         {
+          // SHARP-TEMPORARY-DEBUG-TOP
+          // Replay from copied DEM state at one iteration. These copies share
+          // particle shape objects, so this is a repeatability probe, not a
+          // guarantee of isolation from mutable geometry caches.
+          if (std::getenv("SHARP_DEBUG_DEM_REPLAY") != nullptr &&
+              this->get_current_newton_iteration() == 30)
+            {
+              auto first = ib_dem;
+              auto second = ib_dem;
+              auto changed_candidate = ib_dem;
+              auto changed_forcing = ib_dem;
+              const unsigned int debug_particle = particles.size() > 1 ? 1 : 0;
+              const double velocity_step = 1e-3;
+              const double omega_step = 1e-2;
+              changed_candidate.dem_particles[debug_particle].velocity[1] +=
+                velocity_step;
+              changed_candidate.dem_particles[debug_particle].omega[1] += omega_step;
+              const double force_step = std::max(
+                changed_forcing.dem_particles[debug_particle].fluid_forces.norm(),
+                1e-10) * 1e-6;
+              const double torque_step = std::max(
+                changed_forcing.dem_particles[debug_particle].fluid_torque.norm(),
+                1e-14) * 1e-6;
+              changed_forcing.dem_particles[debug_particle].fluid_forces[1] +=
+                force_step;
+              changed_forcing.dem_particles[debug_particle].fluid_torque[1] +=
+                torque_step;
+              first.integrate_particles_motion(
+                dt, h_max, h_min, fluid_density, kinematic_viscosity);
+              second.integrate_particles_motion(
+                dt, h_max, h_min, fluid_density, kinematic_viscosity);
+              changed_candidate.integrate_particles_motion(
+                dt, h_max, h_min, fluid_density, kinematic_viscosity);
+              changed_forcing.integrate_particles_motion(
+                dt, h_max, h_min, fluid_density, kinematic_viscosity);
+              auto carried = first;
+              carried.update_particles(particles, time - dt, true);
+              carried.integrate_particles_motion(
+                dt, h_max, h_min, fluid_density, kinematic_viscosity);
+              if (std::getenv("SHARP_DEBUG_DEM_SENSITIVITY") != nullptr)
+                for (unsigned int kind = 0; kind < 2; ++kind)
+                  for (const double relative_step : {1e-4, 1e-6, 1e-8})
+                    {
+                      auto plus = ib_dem;
+                      auto minus = ib_dem;
+                      const double scale = kind == 0 ?
+                        std::max(ib_dem.dem_particles[debug_particle].fluid_forces.norm(), 1e-10) :
+                        std::max(ib_dem.dem_particles[debug_particle].fluid_torque.norm(), 1e-14);
+                      const double step = scale * relative_step;
+                      if (kind == 0)
+                        {
+                          plus.dem_particles[debug_particle].fluid_forces[1] += step;
+                          minus.dem_particles[debug_particle].fluid_forces[1] -= step;
+                        }
+                      else
+                        {
+                          plus.dem_particles[debug_particle].fluid_torque[1] += step;
+                          minus.dem_particles[debug_particle].fluid_torque[1] -= step;
+                        }
+                      plus.integrate_particles_motion(
+                        dt, h_max, h_min, fluid_density, kinematic_viscosity);
+                      minus.integrate_particles_motion(
+                        dt, h_max, h_min, fluid_density, kinematic_viscosity);
+                      double max_odd_impulse = 0., max_even_impulse = 0.;
+                      double max_odd_angular = 0., max_even_angular = 0.;
+                      for (unsigned int p = 0; p < particles.size(); ++p)
+                        {
+                          const auto &base = first.dem_particles[p];
+                          const auto &a = plus.dem_particles[p];
+                          const auto &b = minus.dem_particles[p];
+                          max_odd_impulse = std::max(max_odd_impulse,
+                            (a.contact_impulsion - b.contact_impulsion).norm() * .5);
+                          max_even_impulse = std::max(max_even_impulse,
+                            (a.contact_impulsion + b.contact_impulsion -
+                             2. * base.contact_impulsion).norm() * .5);
+                          max_odd_angular = std::max(max_odd_angular,
+                            (a.omega_contact_impulsion - b.omega_contact_impulsion).norm() * .5);
+                          max_even_angular = std::max(max_even_angular,
+                            (a.omega_contact_impulsion + b.omega_contact_impulsion -
+                             2. * base.omega_contact_impulsion).norm() * .5);
+                        }
+                      const auto report_contact_counts = [&](const char *label,
+                                                             const auto &base,
+                                                             const auto &positive,
+                                                             const auto &negative) {
+                        using Key = typename std::decay_t<decltype(base)>::key_type;
+                        std::set<Key> keys;
+                        for (const auto &[key, count] : base) { (void)count; keys.insert(key); }
+                        for (const auto &[key, count] : positive) { (void)count; keys.insert(key); }
+                        for (const auto &[key, count] : negative) { (void)count; keys.insert(key); }
+                        const auto count_of = [](const auto &map, const auto &key) {
+                          const auto it = map.find(key);
+                          return it == map.end() ? 0u : it->second;
+                        };
+                        for (const auto &key : keys)
+                          {
+                            const auto a = count_of(base, key);
+                            const auto b = count_of(positive, key);
+                            const auto c = count_of(negative, key);
+                            if (a != b || a != c)
+                              this->pcout << "[SHARP-TEMP] dem_contact_count kind="
+                                          << (kind == 0 ? "force_y" : "torque_y")
+                                          << " relative_step=" << relative_step
+                                          << " type=" << label << " pair="
+                                          << key.first << ',' << key.second
+                                          << " base_plus_minus=" << a << ',' << b
+                                          << ',' << c << std::endl;
+                          }
+                      };
+                      report_contact_counts("particle",
+                        first.debug_particle_contact_stages,
+                        plus.debug_particle_contact_stages,
+                        minus.debug_particle_contact_stages);
+                      report_contact_counts("wall",
+                        first.debug_wall_contact_stages,
+                        plus.debug_wall_contact_stages,
+                        minus.debug_wall_contact_stages);
+                      for (unsigned int i = 0; i < 4; ++i)
+                        this->pcout
+                          << "[SHARP-TEMP] dem_small_omega kind="
+                          << (kind == 0 ? "force_y" : "torque_y")
+                          << " relative_step=" << relative_step
+                          << " limit=" << std::array<double, 4>{{1e-12, 1e-6, 1e-3, 1.}}[i]
+                          << " base_plus_minus_counts="
+                          << first.debug_small_relative_omega_counts[i] << ','
+                          << plus.debug_small_relative_omega_counts[i] << ','
+                          << minus.debug_small_relative_omega_counts[i]
+                          << " base_plus_minus_max_torque="
+                          << first.debug_small_relative_omega_max_torque[i] << ','
+                          << plus.debug_small_relative_omega_max_torque[i] << ','
+                          << minus.debug_small_relative_omega_max_torque[i]
+                          << std::endl;
+                      this->pcout << "[SHARP-TEMP] dem_sensitivity kind="
+                                  << (kind == 0 ? "force_y" : "torque_y")
+                                  << " particle=" << debug_particle
+                                  << " relative_step=" << relative_step
+                                  << " input_step=" << step
+                                  << " max_odd_even_contact_impulse="
+                                  << max_odd_impulse << ',' << max_even_impulse
+                                  << " max_odd_even_angular_impulse="
+                                  << max_odd_angular << ',' << max_even_angular
+                                  << " target_plus_minus_contact_impulse="
+                                  << plus.dem_particles[debug_particle].contact_impulsion -
+                                       minus.dem_particles[debug_particle].contact_impulsion
+                                  << " target_plus_minus_angular_impulse="
+                                  << plus.dem_particles[debug_particle].omega_contact_impulsion -
+                                       minus.dem_particles[debug_particle].omega_contact_impulsion
+                                  << std::endl;
+                    }
+              double repeat_impulse = 0., repeat_angular_impulse = 0.;
+              double repeat_position = 0., repeat_velocity = 0.;
+              double carried_impulse = 0., carried_angular_impulse = 0.;
+              double candidate_impulse = 0., candidate_angular_impulse = 0.;
+              double forcing_impulse = 0., forcing_angular_impulse = 0.;
+              for (unsigned int p = 0; p < particles.size(); ++p)
+                {
+                  repeat_impulse = std::max(
+                    repeat_impulse,
+                    (first.dem_particles[p].contact_impulsion -
+                     second.dem_particles[p].contact_impulsion).norm());
+                  repeat_angular_impulse = std::max(
+                    repeat_angular_impulse,
+                    (first.dem_particles[p].omega_contact_impulsion -
+                     second.dem_particles[p].omega_contact_impulsion).norm());
+                  repeat_position = std::max(
+                    repeat_position,
+                    first.dem_particles[p].position.distance(
+                      second.dem_particles[p].position));
+                  repeat_velocity = std::max(
+                    repeat_velocity,
+                    (first.dem_particles[p].velocity -
+                     second.dem_particles[p].velocity).norm());
+                  carried_impulse = std::max(
+                    carried_impulse,
+                    (first.dem_particles[p].contact_impulsion -
+                     carried.dem_particles[p].contact_impulsion).norm());
+                  carried_angular_impulse = std::max(
+                    carried_angular_impulse,
+                    (first.dem_particles[p].omega_contact_impulsion -
+                     carried.dem_particles[p].omega_contact_impulsion).norm());
+                  candidate_impulse = std::max(
+                    candidate_impulse,
+                    (first.dem_particles[p].contact_impulsion -
+                     changed_candidate.dem_particles[p].contact_impulsion).norm());
+                  candidate_angular_impulse = std::max(
+                    candidate_angular_impulse,
+                    (first.dem_particles[p].omega_contact_impulsion -
+                     changed_candidate.dem_particles[p].omega_contact_impulsion).norm());
+                  forcing_impulse = std::max(
+                    forcing_impulse,
+                    (first.dem_particles[p].contact_impulsion -
+                     changed_forcing.dem_particles[p].contact_impulsion).norm());
+                  forcing_angular_impulse = std::max(
+                    forcing_angular_impulse,
+                    (first.dem_particles[p].omega_contact_impulsion -
+                     changed_forcing.dem_particles[p].omega_contact_impulsion).norm());
+                }
+              this->pcout << "[SHARP-TEMP] dem_replay newton="
+                          << this->get_current_newton_iteration()
+                          << " copied_state_impulse_delta=" << repeat_impulse
+                          << " copied_state_angular_impulse_delta="
+                          << repeat_angular_impulse
+                          << " copied_state_position_delta=" << repeat_position
+                          << " copied_state_velocity_delta=" << repeat_velocity
+                          << " carried_history_impulse_delta=" << carried_impulse
+                          << " carried_history_angular_impulse_delta="
+                          << carried_angular_impulse
+                          << " perturbed_particle=" << debug_particle
+                          << " candidate_velocity_omega_steps=" << velocity_step
+                          << ',' << omega_step
+                          << " candidate_impulse_angular_delta="
+                          << candidate_impulse << ',' << candidate_angular_impulse
+                          << " force_torque_steps=" << force_step << ',' << torque_step
+                          << " forcing_impulse_angular_delta=" << forcing_impulse
+                          << ',' << forcing_angular_impulse << std::endl;
+            }
+          // SHARP-TEMPORARY-DEBUG-BOTTOM
           ib_dem.integrate_particles_motion(
             dt, h_max, h_min, fluid_density, kinematic_viscosity);
         }
@@ -3342,6 +3648,10 @@ FluidDynamicsSharp<dim>::integrate_particles()
               double inverse_of_relaxation_coefficient_velocity =
                 -bdf_coefs[0] -
                 0.5 * volume * fluid_density / particles[p].mass / dt + DBL_MIN;
+              // SHARP-TEMPORARY-DEBUG-TOP
+              const double debug_velocity_initial_inverse =
+                inverse_of_relaxation_coefficient_velocity;
+              // SHARP-TEMPORARY-DEBUG-BOTTOM
 
               // Evaluate the relaxation parameter using a generalization of the
               // secant method.
@@ -3360,6 +3670,13 @@ FluidDynamicsSharp<dim>::integrate_particles()
                          DBL_MIN);
                 }
               // SHARP-TEMPORARY-DEBUG-TOP
+              if (std::getenv("SHARP_DEBUG_SECANT_FALLBACK") != nullptr &&
+                  (!std::isfinite(inverse_of_relaxation_coefficient_velocity) ||
+                   inverse_of_relaxation_coefficient_velocity >= 0. ||
+                   std::abs(inverse_of_relaxation_coefficient_velocity) >
+                     100. * std::abs(debug_velocity_initial_inverse)))
+                inverse_of_relaxation_coefficient_velocity =
+                  debug_velocity_initial_inverse;
               if (debug_velocity_inverse.size() != particles.size())
                 debug_velocity_inverse.resize(particles.size());
               debug_velocity_inverse[p] =
@@ -3546,6 +3863,10 @@ FluidDynamicsSharp<dim>::integrate_particles()
                 -bdf_coefs[0] - 0.5 * 2. / 5 * volume * fluid_density *
                                   particles[p].radius * particles[p].radius *
                                   inv_inertia.norm() / dt;
+              // SHARP-TEMPORARY-DEBUG-TOP
+              const double debug_omega_initial_inverse =
+                inverse_of_relaxation_coefficient_omega;
+              // SHARP-TEMPORARY-DEBUG-BOTTOM
               // Evaluate the relaxation parameter using a generalization of the
               // secant method.
               if (particles[p].previous_omega_residual.norm() != 0)
@@ -3564,6 +3885,13 @@ FluidDynamicsSharp<dim>::integrate_particles()
                          DBL_MIN);
                 }
               // SHARP-TEMPORARY-DEBUG-TOP
+              if (std::getenv("SHARP_DEBUG_SECANT_FALLBACK") != nullptr &&
+                  (!std::isfinite(inverse_of_relaxation_coefficient_omega) ||
+                   inverse_of_relaxation_coefficient_omega >= 0. ||
+                   std::abs(inverse_of_relaxation_coefficient_omega) >
+                     100. * std::abs(debug_omega_initial_inverse)))
+                inverse_of_relaxation_coefficient_omega =
+                  debug_omega_initial_inverse;
               if (debug_omega_inverse.size() != particles.size())
                 debug_omega_inverse.resize(particles.size());
               debug_omega_inverse[p] = inverse_of_relaxation_coefficient_omega;
@@ -4767,6 +5095,12 @@ FluidDynamicsSharp<dim>::sharp_edge()
                                   // Expand constrained columns explicitly so
                                   // Sharp-IB equations remain valid when the
                                   // column DoF is a periodic slave.
+                                  // SHARP-TEMPORARY-DEBUG-TOP
+                                  if (std::getenv("SHARP_DEBUG_AFFINE_NEGATIVE_SIGN") != nullptr)
+                                    add_matrix_entry_with_periodic_expansion(
+                                      local_dof_indices[i], col, -entries * sum_line);
+                                  else
+                                  // SHARP-TEMPORARY-DEBUG-BOTTOM
                                   add_matrix_entry_with_periodic_expansion(
                                     local_dof_indices[i],
                                     col,
@@ -4813,6 +5147,14 @@ FluidDynamicsSharp<dim>::sharp_edge()
                                     this->evaluation_point(col_non_zero) *
                                     entries_non_zero;
 
+                                  // SHARP-TEMPORARY-DEBUG-TOP
+                                  if (std::getenv("SHARP_DEBUG_AFFINE_NEGATIVE_SIGN") != nullptr)
+                                    add_matrix_entry_with_periodic_expansion(
+                                      local_dof_indices[i],
+                                      col_non_zero,
+                                      -entries_non_zero * sum_line);
+                                  else
+                                  // SHARP-TEMPORARY-DEBUG-BOTTOM
                                   add_matrix_entry_with_periodic_expansion(
                                     local_dof_indices[i],
                                     col_non_zero,
