@@ -3539,6 +3539,12 @@ FluidDynamicsSharp<dim>::integrate_particles()
 
       unsigned int worst_residual_particle_id = UINT_MAX;
 
+      // SHARP-TEMPORARY-DEBUG-TOP
+      std::array<unsigned int, 5> debug_velocity_guard_counts = {};
+      double debug_max_velocity_correction = 0.;
+      unsigned int debug_max_velocity_correction_particle = UINT_MAX;
+      unsigned int debug_nonfinite_velocity_corrections = 0;
+      // SHARP-TEMPORARY-DEBUG-BOTTOM
       bool clear_combined_shape_cache = false;
 
       for (unsigned int p = 0; p < particles.size(); ++p)
@@ -3645,12 +3651,15 @@ FluidDynamicsSharp<dim>::integrate_particles()
                 debug_gravity_acceleration;
               // SHARP-TEMPORARY-DEBUG-BOTTOM
 
-              double inverse_of_relaxation_coefficient_velocity =
+              const double initial_inverse_relaxation_velocity =
                 -bdf_coefs[0] -
                 0.5 * volume * fluid_density / particles[p].mass / dt + DBL_MIN;
+              double inverse_of_relaxation_coefficient_velocity =
+                initial_inverse_relaxation_velocity;
               // SHARP-TEMPORARY-DEBUG-TOP
               const double debug_velocity_initial_inverse =
-                inverse_of_relaxation_coefficient_velocity;
+                initial_inverse_relaxation_velocity;
+              bool debug_undefined_velocity_secant = false;
               // SHARP-TEMPORARY-DEBUG-BOTTOM
 
               // Evaluate the relaxation parameter using a generalization of the
@@ -3661,20 +3670,73 @@ FluidDynamicsSharp<dim>::integrate_particles()
                     (particles[p].velocity - particles[p].velocity_iter);
                   auto vector_of_residual_variation =
                     residual_velocity - particles[p].previous_velocity_residual;
-                  double dot_product_of_the_variation_vectors =
+                  const double dot_product_of_the_variation_vectors =
                     scalar_product(vector_of_velocity_variation,
                                    vector_of_residual_variation);
-                  inverse_of_relaxation_coefficient_velocity =
-                    1 / (dot_product_of_the_variation_vectors /
-                           (vector_of_residual_variation.norm_square()) +
-                         DBL_MIN);
+                  const double residual_variation_squared =
+                    vector_of_residual_variation.norm_square();
+                  if (std::isfinite(dot_product_of_the_variation_vectors) &&
+                      std::isfinite(residual_variation_squared) &&
+                      dot_product_of_the_variation_vectors != 0. &&
+                      residual_variation_squared > 0.)
+                    inverse_of_relaxation_coefficient_velocity =
+                      residual_variation_squared /
+                      dot_product_of_the_variation_vectors;
+                  // SHARP-TEMPORARY-DEBUG-TOP
+                  else
+                    debug_undefined_velocity_secant = true;
+                  // SHARP-TEMPORARY-DEBUG-BOTTOM
                 }
               // SHARP-TEMPORARY-DEBUG-TOP
+              const double debug_unsafeguarded_inverse =
+                inverse_of_relaxation_coefficient_velocity;
+              // SHARP-TEMPORARY-DEBUG-BOTTOM
+
+              // A particle's residual also changes when the fluid and other
+              // particles change, so its scalar secant can point uphill or
+              // suggest an almost zero or excessively large correction. Use
+              // the added-mass estimate when the secant is outside these bounds.
+              const double initial_inverse_magnitude =
+                std::abs(initial_inverse_relaxation_velocity);
+              if (!std::isfinite(inverse_of_relaxation_coefficient_velocity) ||
+                  inverse_of_relaxation_coefficient_velocity >= 0. ||
+                  std::abs(inverse_of_relaxation_coefficient_velocity) >
+                    100. * initial_inverse_magnitude ||
+                  std::abs(inverse_of_relaxation_coefficient_velocity) <
+                    0.1 * initial_inverse_magnitude)
+                inverse_of_relaxation_coefficient_velocity =
+                  initial_inverse_relaxation_velocity;
+              // SHARP-TEMPORARY-DEBUG-TOP
+              if (std::getenv("SHARP_DEBUG_UNSAFE_SECANT") != nullptr)
+                inverse_of_relaxation_coefficient_velocity =
+                  debug_unsafeguarded_inverse;
+              if (debug_undefined_velocity_secant)
+                ++debug_velocity_guard_counts[4];
+              else if (!std::isfinite(debug_unsafeguarded_inverse))
+                ++debug_velocity_guard_counts[0];
+              else if (debug_unsafeguarded_inverse >= 0.)
+                ++debug_velocity_guard_counts[1];
+              else if (std::abs(debug_unsafeguarded_inverse) >
+                       100. * initial_inverse_magnitude)
+                ++debug_velocity_guard_counts[2];
+              else if (std::abs(debug_unsafeguarded_inverse) <
+                       0.1 * initial_inverse_magnitude)
+                ++debug_velocity_guard_counts[3];
+              const char *debug_max_ratio_text =
+                std::getenv("SHARP_DEBUG_SECANT_MAX_RATIO");
+              const double debug_requested_ratio =
+                debug_max_ratio_text != nullptr ? std::atof(debug_max_ratio_text) : 100.;
+              const double debug_max_ratio =
+                std::isfinite(debug_requested_ratio) && debug_requested_ratio > 0. ?
+                  debug_requested_ratio : 100.;
               if (std::getenv("SHARP_DEBUG_SECANT_FALLBACK") != nullptr &&
+                  std::getenv("SHARP_DEBUG_SECANT_OMEGA_ONLY") == nullptr &&
                   (!std::isfinite(inverse_of_relaxation_coefficient_velocity) ||
-                   inverse_of_relaxation_coefficient_velocity >= 0. ||
-                   std::abs(inverse_of_relaxation_coefficient_velocity) >
-                     100. * std::abs(debug_velocity_initial_inverse)))
+                   (std::getenv("SHARP_DEBUG_SECANT_NO_SIGN_GUARD") == nullptr &&
+                    inverse_of_relaxation_coefficient_velocity >= 0.) ||
+                   (std::getenv("SHARP_DEBUG_SECANT_NO_MAGNITUDE_GUARD") == nullptr &&
+                    std::abs(inverse_of_relaxation_coefficient_velocity) >
+                      debug_max_ratio * std::abs(debug_velocity_initial_inverse))))
                 inverse_of_relaxation_coefficient_velocity =
                   debug_velocity_initial_inverse;
               if (debug_velocity_inverse.size() != particles.size())
@@ -3703,6 +3765,18 @@ FluidDynamicsSharp<dim>::integrate_particles()
                 }
               else
                 velocity_correction_vector = residual_velocity;
+
+              // SHARP-TEMPORARY-DEBUG-TOP
+              const double debug_velocity_correction =
+                (velocity_correction_vector * alpha * local_alpha).norm();
+              if (!std::isfinite(debug_velocity_correction))
+                ++debug_nonfinite_velocity_corrections;
+              else if (debug_velocity_correction > debug_max_velocity_correction)
+                {
+                  debug_max_velocity_correction = debug_velocity_correction;
+                  debug_max_velocity_correction_particle = p;
+                }
+              // SHARP-TEMPORARY-DEBUG-BOTTOM
 
               // Update the particle state and keep in memory the last iteration
               // information.
@@ -3886,6 +3960,7 @@ FluidDynamicsSharp<dim>::integrate_particles()
                 }
               // SHARP-TEMPORARY-DEBUG-TOP
               if (std::getenv("SHARP_DEBUG_SECANT_FALLBACK") != nullptr &&
+                  std::getenv("SHARP_DEBUG_SECANT_VELOCITY_ONLY") == nullptr &&
                   (!std::isfinite(inverse_of_relaxation_coefficient_omega) ||
                    inverse_of_relaxation_coefficient_omega >= 0. ||
                    std::abs(inverse_of_relaxation_coefficient_omega) >
@@ -3938,6 +4013,9 @@ FluidDynamicsSharp<dim>::integrate_particles()
                 << " delta_residual_squared=" << debug_dr.norm_square()
                 << " inverse_velocity="
                 << inverse_of_relaxation_coefficient_velocity
+                << " raw_inverse_velocity=" << debug_unsafeguarded_inverse
+                << " initial_inverse_velocity=" << initial_inverse_relaxation_velocity
+                << " undefined_velocity_secant=" << debug_undefined_velocity_secant
                 << " omega_before=" << particles[p].omega
                 << " omega_residual=" << residual_omega
                 << " delta_omega=" << debug_dw
@@ -3954,6 +4032,25 @@ FluidDynamicsSharp<dim>::integrate_particles()
                      !this->simulation_parameters.particlesParameters
                         ->explicit_position_integration_calculation);
               this->pcout << debug_particle.str() << std::endl;
+              // SHARP-TEMPORARY-DEBUG-BOTTOM
+              // SHARP-TEMPORARY-DEBUG-TOP
+              if (std::getenv("SHARP_DEBUG_COUPLING_DETAIL") != nullptr)
+                {
+                  const auto debug_angular_acceleration =
+                    invert(particles[p].rotation_matrix) *
+                    angular_acceleration_in_particle_frame;
+                  this->pcout
+                    << "[SHARP-TEMP] angular_budget newton="
+                    << this->get_current_newton_iteration() << " particle=" << p
+                    << " fluid_torque=" << particles[p].fluid_torque
+                    << " contact_torque="
+                    << particles[p].omega_contact_impulsion / dt
+                    << " angular_acceleration=" << debug_angular_acceleration
+                    << " bdf_term=" << residual_omega - debug_angular_acceleration
+                    << " inertia_diag=" << particles[p].inertia[0][0] << ','
+                    << particles[p].inertia[1][1] << ','
+                    << particles[p].inertia[2][2] << std::endl;
+                }
               // SHARP-TEMPORARY-DEBUG-BOTTOM
               double local_alpha_omega = 1;
 
@@ -4063,6 +4160,25 @@ FluidDynamicsSharp<dim>::integrate_particles()
       if (clear_combined_shape_cache)
         combined_shapes->clear_cache();
 
+      // SHARP-TEMPORARY-DEBUG-TOP
+      this->pcout << "[SHARP-TEMP] velocity_secant_guard newton="
+                  << this->get_current_newton_iteration()
+                  << " step=" << this->simulation_control->get_iteration_number()
+                  << " inverse_magnitude_bounds=0.1,100"
+                  << " unsafe_override="
+                  << (std::getenv("SHARP_DEBUG_UNSAFE_SECANT") != nullptr)
+                  << " nonfinite_wrong_sign_small_step_large_step_undefined="
+                  << debug_velocity_guard_counts[0] << ','
+                  << debug_velocity_guard_counts[1] << ','
+                  << debug_velocity_guard_counts[2] << ','
+                  << debug_velocity_guard_counts[3] << ','
+                  << debug_velocity_guard_counts[4]
+                  << " max_velocity_correction="
+                  << debug_max_velocity_correction
+                  << " particle=" << debug_max_velocity_correction_particle
+                  << " nonfinite_corrections="
+                  << debug_nonfinite_velocity_corrections << std::endl;
+      // SHARP-TEMPORARY-DEBUG-BOTTOM
       if (this->simulation_parameters.physics_solving_strategy
             .at(PhysicsID::fluid_dynamics)
             .verbosity != Parameters::Verbosity::quiet)
@@ -4747,6 +4863,7 @@ FluidDynamicsSharp<dim>::sharp_edge()
   // collectively before Sharp replaces selected entries.
   if (std::getenv("SHARP_DEBUG_SYNC_RHS") != nullptr)
     this->system_rhs.compress(VectorOperation::add);
+  std::map<types::global_dof_index, double> debug_reference_weight;
   const auto debug_previous_pressure_reference = debug_pressure_reference;
   debug_pressure_reference.clear();
   const auto debug_previous_rows = debug_row_kind;
@@ -5523,6 +5640,10 @@ FluidDynamicsSharp<dim>::sharp_edge()
                                       debug_pressure_reference
                                         [global_index_overwrite] =
                                           local_dof_indices[k];
+                                      if (std::getenv("SHARP_DEBUG_COUPLING_DETAIL") != nullptr)
+                                        debug_reference_weight[global_index_overwrite] =
+                                          sum_line / this->simulation_parameters
+                                            .stabilization.pressure_scaling_factor;
                                       // SHARP-TEMPORARY-DEBUG-BOTTOM
                                       add_matrix_entry_with_periodic_expansion(
                                         global_index_overwrite,
@@ -5720,6 +5841,59 @@ FluidDynamicsSharp<dim>::sharp_edge()
   this->pcout << "[SHARP-TEMP] pressure_reference_added_switched_removed="
               << debug_reference_changes[0] << ',' << debug_reference_changes[1]
               << ',' << debug_reference_changes[2] << std::endl;
+  if (std::getenv("SHARP_DEBUG_COUPLING_DETAIL") != nullptr)
+    {
+      double debug_switch_squared = 0.;
+      double debug_switch_max = 0.;
+      double debug_weighted_squared = 0.;
+      double debug_weighted_max = 0.;
+      unsigned int debug_accessible = 0;
+      unsigned int debug_inaccessible = 0;
+      for (const auto &[row, reference] : debug_pressure_reference)
+        if (this->locally_owned_dofs.is_element(row))
+          {
+            const auto old = debug_previous_pressure_reference.find(row);
+            if (old == debug_previous_pressure_reference.end() ||
+                old->second == reference)
+              continue;
+            if (!this->locally_relevant_dofs.is_element(old->second) ||
+                !this->locally_relevant_dofs.is_element(reference))
+              {
+                ++debug_inaccessible;
+                continue;
+              }
+            const double delta = this->evaluation_point(reference) -
+                                 this->evaluation_point(old->second);
+            debug_switch_squared += delta * delta;
+            debug_switch_max = std::max(debug_switch_max, std::abs(delta));
+            const double weighted_delta = delta * debug_reference_weight.at(row);
+            debug_weighted_squared += weighted_delta * weighted_delta;
+            debug_weighted_max = std::max(debug_weighted_max,
+                                          std::abs(weighted_delta));
+            ++debug_accessible;
+          }
+      const auto debug_total_squared =
+        Utilities::MPI::sum(debug_switch_squared, this->mpi_communicator);
+      const auto debug_total_max =
+        Utilities::MPI::max(debug_switch_max, this->mpi_communicator);
+      const auto debug_total_weighted_squared =
+        Utilities::MPI::sum(debug_weighted_squared, this->mpi_communicator);
+      const auto debug_total_weighted_max =
+        Utilities::MPI::max(debug_weighted_max, this->mpi_communicator);
+      const auto debug_total_accessible =
+        Utilities::MPI::sum(debug_accessible, this->mpi_communicator);
+      const auto debug_total_inaccessible =
+        Utilities::MPI::sum(debug_inaccessible, this->mpi_communicator);
+      this->pcout << "[SHARP-TEMP] pressure_switch_delta newton="
+                  << this->get_current_newton_iteration()
+                  << " rhs_call=" << debug_rhs_calls
+                  << " accessible=" << debug_total_accessible
+                  << " inaccessible=" << debug_total_inaccessible
+                  << " l2=" << std::sqrt(debug_total_squared)
+                  << " max=" << debug_total_max
+                  << " weighted_l2=" << std::sqrt(debug_total_weighted_squared)
+                  << " weighted_max=" << debug_total_weighted_max << std::endl;
+    }
   debug_stencils();
   std::vector<double> debug_transitions(81, 0.);
   for (const auto row : this->locally_owned_dofs)

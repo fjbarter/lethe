@@ -314,6 +314,10 @@ public:
   std::vector<IBParticle<dim>> dem_particles;
 
   // SHARP-TEMPORARY-DEBUG-TOP
+  std::vector<std::array<double, 4>> debug_contact_torque_peaks;
+  // SHARP-TEMPORARY-DEBUG-BOTTOM
+
+  // SHARP-TEMPORARY-DEBUG-TOP
   std::map<std::pair<unsigned int, unsigned int>, unsigned int>
     debug_particle_contact_stages;
   std::map<std::pair<unsigned int, types::boundary_id>, unsigned int>

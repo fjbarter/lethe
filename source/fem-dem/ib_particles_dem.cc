@@ -496,6 +496,23 @@ IBParticlesDEM<dim>::calculate_pp_contact_force(
                                         particle_two_properties,
                                         dt_dem);
 
+                  // SHARP-TEMPORARY-DEBUG-TOP
+                  if (std::getenv("SHARP_DEBUG_COUPLING_DETAIL") != nullptr &&
+                      particle_one.particle_id < debug_contact_torque_peaks.size() &&
+                      particle_two.particle_id < debug_contact_torque_peaks.size())
+                    for (const auto *debug_particle :
+                         {&particle_one, &particle_two})
+                      {
+                        auto &peaks =
+                          debug_contact_torque_peaks[debug_particle->particle_id];
+                        peaks[0] = std::max(peaks[0], rolling_resistance_torque.norm());
+                        peaks[1] = std::max(
+                          peaks[1],
+                          cross_product_3d(
+                            contact_point_3d - point_nd_to_3d(debug_particle->position),
+                            normal_force + tangential_force).norm());
+                      }
+                  // SHARP-TEMPORARY-DEBUG-BOTTOM
                   contact_force[particle_one.particle_id] -=
                     (normal_force + tangential_force);
                   contact_force[particle_two.particle_id] +=
@@ -1012,6 +1029,18 @@ IBParticlesDEM<dim>::calculate_pw_contact_force(
                                         wall_properties,
                                         dt_dem);
 
+                  // SHARP-TEMPORARY-DEBUG-TOP
+                  if (std::getenv("SHARP_DEBUG_COUPLING_DETAIL") != nullptr &&
+                      particle.particle_id < debug_contact_torque_peaks.size())
+                    {
+                      auto &peaks = debug_contact_torque_peaks[particle.particle_id];
+                      peaks[2] = std::max(peaks[2], rolling_resistance_torque.norm());
+                      peaks[3] = std::max(
+                        peaks[3],
+                        cross_product_3d(contact_point - particle_position_3d,
+                                         normal_force + tangential_force).norm());
+                    }
+                  // SHARP-TEMPORARY-DEBUG-BOTTOM
                   // Updating the force of particles in the particle handler
                   contact_force[particle.particle_id] -=
                     (normal_force + tangential_force);
@@ -1435,6 +1464,9 @@ IBParticlesDEM<dim>::integrate_particles_motion(const double dt,
                                                 const double rho,
                                                 const double mu)
 {
+  // SHARP-TEMPORARY-DEBUG-TOP
+  debug_contact_torque_peaks.assign(dem_particles.size(), {});
+  // SHARP-TEMPORARY-DEBUG-BOTTOM
   // SHARP-TEMPORARY-DEBUG-TOP
   debug_particle_contact_stages.clear();
   debug_wall_contact_stages.clear();
@@ -2116,6 +2148,14 @@ IBParticlesDEM<dim>::integrate_particles_motion(const double dt,
               << debug_force_peaks[p][0] << ',' << debug_force_peaks[p][1]
               << ',' << debug_force_peaks[p][2] << ','
               << debug_force_peaks[p][3] << std::endl;
+  if (std::getenv("SHARP_DEBUG_COUPLING_DETAIL") != nullptr)
+    for (unsigned int p = 0; p < dem_particles.size(); ++p)
+      debug_out << "[SHARP-TEMP] DEM_torque_peaks particle=" << p
+                << " pair_rolling_moment_wall_rolling_moment="
+                << debug_contact_torque_peaks[p][0] << ','
+                << debug_contact_torque_peaks[p][1] << ','
+                << debug_contact_torque_peaks[p][2] << ','
+                << debug_contact_torque_peaks[p][3] << std::endl;
   // SHARP-TEMPORARY-DEBUG-BOTTOM
 }
 
