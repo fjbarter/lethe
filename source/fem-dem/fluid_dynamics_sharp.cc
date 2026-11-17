@@ -355,9 +355,14 @@ FluidDynamicsSharp<dim>::debug_prepare_rhs()
   std::vector<Tensor<1, dim>>      trial_u(this->face_quadrature->size());
   double outlet_area = 0., activated_area = 0., deactivated_area = 0.;
   double stable_remainder = 0., switched_remainder = 0.;
+  const char *debug_outlet_iteration =
+    std::getenv("SHARP_DEBUG_OUTLET_FD_ITERATION");
+  const auto debug_outlet_target = debug_outlet_iteration != nullptr ?
+    std::strtoul(debug_outlet_iteration, nullptr, 10) : 20UL;
   const bool debug_check_outlet_assembler =
     std::getenv("SHARP_DEBUG_OUTLET_FACE_FD") != nullptr &&
-    this->get_current_newton_iteration() == 20 && debug_trial_norm > 0.;
+    this->get_current_newton_iteration() == debug_outlet_target &&
+    debug_trial_norm > 0.;
   std::array<double, 6> debug_face_fd = {};
   for (const auto &cell : this->dof_handler->active_cell_iterators())
     if (cell->is_locally_owned() && cell->at_boundary())
@@ -555,11 +560,19 @@ FluidDynamicsSharp<dim>::debug_finish_rhs()
                         0)
                   << " physical_value=" << this->evaluation_point(global_row);
               if (debug_pressure_reference.count(global_row))
-                out << " pressure_reference="
-                    << debug_pressure_reference.at(global_row)
-                    << " reference_value="
-                    << this->evaluation_point(
-                         debug_pressure_reference.at(global_row));
+                {
+                  const char *blend_row =
+                    std::getenv("SHARP_DEBUG_BLEND_PRESSURE_ROW");
+                  const bool blended =
+                    blend_row != nullptr &&
+                    global_row == std::strtoull(blend_row, nullptr, 10);
+                  out << (blended ? " natural_reference_before_blend=" :
+                                    " pressure_reference=")
+                      << debug_pressure_reference.at(global_row)
+                      << " reference_value="
+                      << this->evaluation_point(
+                           debug_pressure_reference.at(global_row));
+                }
               message = out.str();
             }
           const auto messages =
@@ -569,6 +582,38 @@ FluidDynamicsSharp<dim>::debug_finish_rhs()
               this->pcout << entry << std::endl;
         }
       return;
+    }
+  // Compare global residual norms using the already assembled base, matrix
+  // prediction and trial; all ranks participate in each norm reduction.
+  if (std::getenv("SHARP_DEBUG_GLOBAL_DESCENT") != nullptr)
+    {
+      const double base_norm = debug_base_rhs.l2_norm();
+      const double predicted_norm = debug_prediction.l2_norm();
+      const double actual_norm = this->system_rhs.l2_norm();
+      this->pcout << std::scientific << std::setprecision(12)
+                  << "[SHARP-TEMP] global_descent newton="
+                  << this->get_current_newton_iteration()
+                  << " rhs_call=" << debug_rhs_calls
+                  << " base=" << base_norm
+                  << " predicted=" << predicted_norm
+                  << " actual=" << actual_norm << std::endl;
+    }
+  // Check the experimental row against the frozen-geometry Jacobian during
+  // line-search trials. Only the row owner reads and reports the entries.
+  const char *debug_blend_row = std::getenv("SHARP_DEBUG_BLEND_PRESSURE_ROW");
+  if (debug_blend_row != nullptr)
+    {
+      const auto row = static_cast<types::global_dof_index>(
+        std::strtoull(debug_blend_row, nullptr, 10));
+      if (this->locally_owned_dofs.is_element(row))
+        std::cout << std::scientific << std::setprecision(12)
+                  << "[SHARP-TEMP] pressure_blend_jacobian newton="
+                  << this->get_current_newton_iteration()
+                  << " rhs_call=" << debug_rhs_calls << " row=" << row
+                  << " actual=" << this->system_rhs(row)
+                  << " predicted=" << debug_prediction(row)
+                  << " defect=" << this->system_rhs(row) - debug_prediction(row)
+                  << std::endl;
     }
   std::vector<double>     defect(9, 0.), change(9, 0.), bad(9, 0.);
   double                  peak    = 0.;
@@ -5640,6 +5685,35 @@ FluidDynamicsSharp<dim>::sharp_edge()
                                       debug_pressure_reference
                                         [global_index_overwrite] =
                                           local_dof_indices[k];
+                                      if (std::getenv("SHARP_DEBUG_PRESSURE_SWITCH_TRACE") != nullptr &&
+                                          debug_rhs_calls == 0)
+                                        {
+                                          const auto old_reference =
+                                            debug_previous_pressure_reference.find(global_index_overwrite);
+                                          if (old_reference != debug_previous_pressure_reference.end() &&
+                                              old_reference->second != local_dof_indices[k])
+                                            {
+                                              std::ostringstream trace;
+                                              trace << std::scientific << std::setprecision(12)
+                                                    << "[SHARP-TEMP] pressure_switch_trace step="
+                                                    << this->simulation_control->get_iteration_number()
+                                                    << " newton=" << this->get_current_newton_iteration()
+                                                    << " rank=" << Utilities::MPI::this_mpi_process(this->mpi_communicator)
+                                                    << " row=" << global_index_overwrite
+                                                    << " point=" << support_points.at(global_index_overwrite)
+                                                    << " particle=" << ib_particle_id
+                                                    << " particle_position=" << particles[ib_particle_id].position
+                                                    << " particle_radius=" << particles[ib_particle_id].radius
+                                                    << " cell_center=" << cell_cut->center()
+                                                    << " old_reference=" << old_reference->second
+                                                    << " new_reference=" << local_dof_indices[k]
+                                                    << " new_point=" << support_points.at(local_dof_indices[k]);
+                                              const auto old_point = support_points.find(old_reference->second);
+                                              if (old_point != support_points.end())
+                                                trace << " old_point=" << old_point->second;
+                                              std::cout << trace.str() << std::endl;
+                                            }
+                                        }
                                       if (std::getenv("SHARP_DEBUG_COUPLING_DETAIL") != nullptr)
                                         debug_reference_weight[global_index_overwrite] =
                                           sum_line / this->simulation_parameters
@@ -5654,6 +5728,127 @@ FluidDynamicsSharp<dim>::sharp_edge()
                                 }
                             }
 
+                          // SHARP-TEMPORARY-DEBUG-TOP
+                          // Counterfactual only: keep one selected pressure
+                          // reference fixed, even if it is inside the particle.
+                          // This is not a physically valid boundary condition.
+                          const char *debug_pin_row =
+                            std::getenv("SHARP_DEBUG_PIN_PRESSURE_ROW");
+                          const char *debug_pin_reference =
+                            std::getenv("SHARP_DEBUG_PIN_PRESSURE_REFERENCE");
+                          if (component_i == dim && debug_pin_row != nullptr &&
+                              debug_pin_reference != nullptr &&
+                              global_index_overwrite ==
+                                std::strtoull(debug_pin_row, nullptr, 10))
+                            {
+                              const auto desired_reference =
+                                static_cast<types::global_dof_index>(
+                                  std::strtoull(debug_pin_reference, nullptr, 10));
+                              const auto natural_reference =
+                                debug_pressure_reference.find(global_index_overwrite);
+                              if (natural_reference != debug_pressure_reference.end() &&
+                                  this->locally_relevant_dofs.is_element(desired_reference))
+                                {
+                                  if (natural_reference->second != desired_reference)
+                                    {
+                                      add_matrix_entry_with_periodic_expansion(
+                                        global_index_overwrite,
+                                        natural_reference->second,
+                                        sum_line);
+                                      add_matrix_entry_with_periodic_expansion(
+                                        global_index_overwrite,
+                                        desired_reference,
+                                        -sum_line);
+                                      v_ib = this->evaluation_point(desired_reference);
+                                      if (debug_rhs_calls == 0)
+                                        std::cout << "[SHARP-TEMP] pressure_pin step="
+                                                  << this->simulation_control->get_iteration_number()
+                                                  << " newton=" << this->get_current_newton_iteration()
+                                                  << " row=" << global_index_overwrite
+                                                  << " natural=" << natural_reference->second
+                                                  << " forced=" << desired_reference << std::endl;
+                                      natural_reference->second = desired_reference;
+                                    }
+                                }
+                              else if (debug_rhs_calls == 0)
+                                std::cout << "[SHARP-TEMP] pressure_pin_unavailable row="
+                                          << global_index_overwrite
+                                          << " forced=" << desired_reference << std::endl;
+                            }
+                          // SHARP-TEMPORARY-DEBUG-BOTTOM
+                          // SHARP-TEMPORARY-DEBUG-TOP
+                          // Single-row experiment only: use an exterior-node
+                          // blend over the row's cell star. This is not a
+                          // general pressure treatment: periodic image and
+                          // other-particle exclusion are not implemented.
+                          const char *debug_blend_row =
+                            std::getenv("SHARP_DEBUG_BLEND_PRESSURE_ROW");
+                          if (component_i == dim && debug_blend_row != nullptr &&
+                              global_index_overwrite ==
+                                std::strtoull(debug_blend_row, nullptr, 10))
+                            {
+                              const auto natural_reference =
+                                debug_pressure_reference.find(global_index_overwrite);
+                              std::map<types::global_dof_index, double> weights;
+                              const auto neighbors =
+                                LetheGridTools::find_cells_around_cell<dim>(
+                                  vertices_to_cell, cell_cut);
+                              std::vector<types::global_dof_index> neighbor_dofs(
+                                dofs_per_cell);
+                              for (const auto &neighbor : neighbors)
+                                if (neighbor->is_locally_owned() || neighbor->is_ghost())
+                                  {
+                                    neighbor->get_dof_indices(neighbor_dofs);
+                                    if (std::find(neighbor_dofs.begin(),
+                                                  neighbor_dofs.end(),
+                                                  global_index_overwrite) == neighbor_dofs.end())
+                                      continue;
+                                    for (unsigned int k = 0; k < neighbor_dofs.size(); ++k)
+                                      if (this->fe->system_to_component_index(k).first == dim &&
+                                          this->locally_relevant_dofs.is_element(neighbor_dofs[k]))
+                                        {
+                                          const auto point_it = support_points.find(neighbor_dofs[k]);
+                                          if (point_it == support_points.end())
+                                            continue;
+                                          const double signed_distance =
+                                            particles[ib_particle_id].get_levelset(point_it->second,
+                                                                                  neighbor);
+                                          if (signed_distance > 0.)
+                                            weights[neighbor_dofs[k]] = signed_distance;
+                                        }
+                                  }
+                              double weight_sum = 0.;
+                              for (const auto &[dof, weight] : weights)
+                                {
+                                  (void)dof;
+                                  weight_sum += weight;
+                                }
+                              if (natural_reference != debug_pressure_reference.end() &&
+                                  weight_sum > 1e-12 * dr)
+                                {
+                                  add_matrix_entry_with_periodic_expansion(
+                                    global_index_overwrite, natural_reference->second, sum_line);
+                                  v_ib = 0.;
+                                  for (const auto &[dof, weight] : weights)
+                                    {
+                                      const double fraction = weight / weight_sum;
+                                      add_matrix_entry_with_periodic_expansion(
+                                        global_index_overwrite, dof, -sum_line * fraction);
+                                      v_ib += fraction * this->evaluation_point(dof);
+                                    }
+                                  if (debug_rhs_calls == 0)
+                                    std::cout << "[SHARP-TEMP] pressure_blend newton="
+                                              << this->get_current_newton_iteration()
+                                              << " row=" << global_index_overwrite
+                                              << " candidates=" << weights.size()
+                                              << " weight_sum=" << weight_sum
+                                              << " reference_value=" << v_ib << std::endl;
+                                }
+                              else if (debug_rhs_calls == 0)
+                                std::cout << "[SHARP-TEMP] pressure_blend_fallback row="
+                                          << global_index_overwrite << std::endl;
+                            }
+                          // SHARP-TEMPORARY-DEBUG-BOTTOM
                           for (unsigned int k = 0; k < ib_coef.size(); ++k)
                             {
                               rhs_add +=

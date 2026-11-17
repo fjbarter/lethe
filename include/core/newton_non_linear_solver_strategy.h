@@ -144,18 +144,33 @@ NewtonNonLinearSolverStrategy<VectorType>::solve()
                    .count(),
                  0.,
                  0.);
-      const bool debug_choose_best =
+      const char *debug_alpha_iteration =
+        std::getenv("SHARP_DEBUG_ALPHA_AT_NEWTON");
+      const char *debug_alpha_from =
+        std::getenv("SHARP_DEBUG_ALPHA_FROM_NEWTON");
+      const bool debug_alpha_selected = debug_alpha_from != nullptr ?
+        this->outer_iteration >= std::strtoul(debug_alpha_from, nullptr, 10) :
+        (debug_alpha_iteration == nullptr ||
+         this->outer_iteration == std::strtoul(debug_alpha_iteration, nullptr, 10));
+      const bool debug_choose_best = debug_alpha_selected &&
         std::getenv("SHARP_DEBUG_ALPHA_BEST") != nullptr;
       double debug_best_alpha = 0.;
       double debug_best_residual = debug_fresh_res;
-      if (debug_choose_best || std::getenv("SHARP_DEBUG_ALPHA_SWEEP") != nullptr)
+      if (debug_alpha_selected &&
+          (debug_choose_best || std::getenv("SHARP_DEBUG_ALPHA_SWEEP") != nullptr))
         {
           auto &debug_trial = solver->get_local_evaluation_point();
           auto &debug_update = solver->get_newton_update();
-          const double debug_min_alpha =
+          double debug_min_alpha =
             std::getenv("SHARP_DEBUG_ALPHA_FINE") != nullptr ?
               1. / 65536. :
               1. / 128.;
+          if (const char *minimum = std::getenv("SHARP_DEBUG_ALPHA_MIN"))
+            {
+              const double requested = std::strtod(minimum, nullptr);
+              if (requested > 0. && requested <= 1.)
+                debug_min_alpha = requested;
+            }
           for (double alpha = 1.; alpha >= debug_min_alpha; alpha *= 0.5)
             {
               debug_trial = present_solution;
@@ -173,6 +188,8 @@ NewtonNonLinearSolverStrategy<VectorType>::solve()
                 {
                   debug_best_residual = debug_residual;
                   debug_best_alpha = alpha;
+                  if (std::getenv("SHARP_DEBUG_ALPHA_FIRST_IMPROVING") != nullptr)
+                    break;
                 }
             }
           evaluation_point = present_solution;

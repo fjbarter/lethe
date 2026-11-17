@@ -36,6 +36,7 @@
 // SHARP-TEMPORARY-DEBUG-TOP
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <string>
 // SHARP-TEMPORARY-DEBUG-BOTTOM
 
