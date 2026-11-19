@@ -6,7 +6,10 @@
 
 #include <core/vector.h>
 
+#include <deal.II/base/tensor.h>
 #include <deal.II/base/utilities.h>
+
+#include <deal.II/dofs/dof_handler.h>
 
 #include <cmath>
 
@@ -55,6 +58,31 @@ calculate_navier_stokes_gls_tau_transient(const double u_mag,
                         Utilities::fixed_power<2>(2. * u_mag / h) +
                         9 * Utilities::fixed_power<2>(4 * kinematic_viscosity /
                                                       (h * h)));
+}
+
+/**
+ * @brief Directional derivative of the GLS parameter with respect to the
+ * advective velocity, keeping the stabilization viscosity fixed.
+ *
+ * @param tau Current stabilization parameter, steady or transient.
+ * @param h Cell size used in the stabilization parameter.
+ * @param velocity Advective velocity.
+ * @param velocity_increment Direction in which velocity is varied.
+ * @return Directional derivative of tau.
+ */
+template <int dim>
+inline double
+calculate_navier_stokes_gls_tau_velocity_derivative(
+  const double          tau,
+  const double          h,
+  const Tensor<1, dim> &velocity,
+  const Tensor<1, dim> &velocity_increment)
+{
+  // The velocity magnitude used by the assembler is clamped below 1e-12.
+  if (velocity.norm() <= 1e-12)
+    return 0.;
+
+  return -4. * tau * tau * tau / (h * h) * (velocity * velocity_increment);
 }
 
 /**

@@ -577,6 +577,9 @@ IBParticlesDEM<dim>::calculate_pp_lubrication_force(
                   radial_velocity =
                     scalar_product(-radial_vector, particle_one.velocity) +
                     scalar_product(radial_vector, particle_two.velocity);
+                  // The velocity projection is onto the unit separation
+                  // vector, not the separation vector itself.
+                  radial_velocity /= radial_vector.norm();
                   f_lub =
                     3. / 2. * PI * mu *
                       (particle_one.radius * 2 * particle_two.radius * 2 /
@@ -1152,12 +1155,14 @@ IBParticlesDEM<dim>::calculate_pw_lubrication_force(
                   radial_velocity =
                     scalar_product(-radial_vector,
                                    particle.velocity - wall_velocity_at_point);
-                  f_lub = 3. / 2. * PI * mu * (particle.radius) *
-                            (particle.radius) / gap * radial_velocity *
-                            radial_vector / radial_vector.norm() -
-                          3. / 2. * PI * mu * (particle.radius) *
-                            (particle.radius) / h_max * radial_velocity *
-                            radial_vector / radial_vector.norm();
+                  radial_velocity /= radial_vector.norm();
+                  // The infinite-wall-radius limit uses the particle diameter.
+                  const double diameter = 2. * particle.radius;
+                  f_lub =
+                    3. / 2. * PI * mu * diameter * diameter / gap *
+                      radial_velocity * radial_vector / radial_vector.norm() -
+                    3. / 2. * PI * mu * diameter * diameter / h_max *
+                      radial_velocity * radial_vector / radial_vector.norm();
 
                   // A particle can be close to several walls: the force of
                   // each wall is added.

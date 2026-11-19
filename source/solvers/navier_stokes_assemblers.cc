@@ -88,6 +88,7 @@ PSPGSUPGNavierStokesAssemblerCore<dim>::assemble_matrix(
 
       std::vector<Tensor<1, dim>> grad_phi_u_j_x_velocity(n_dofs);
       std::vector<Tensor<1, dim>> velocity_gradient_x_phi_u_j(n_dofs);
+      std::vector<double>         tau_velocity_derivative(n_dofs);
 
 
       // We loop over the column first to prevent recalculation
@@ -97,6 +98,10 @@ PSPGSUPGNavierStokesAssemblerCore<dim>::assemble_matrix(
           const auto &phi_u_j           = scratch_data.phi_u[q][j];
           const auto &grad_phi_u_j      = scratch_data.grad_phi_u[q][j];
           const auto &laplacian_phi_u_j = scratch_data.laplacian_phi_u[q][j];
+
+          tau_velocity_derivative[j] =
+            calculate_navier_stokes_gls_tau_velocity_derivative(
+              tau, h, advective_velocity, phi_u_j);
 
           const auto &grad_phi_p_j =
             pressure_scaling_factor * scratch_data.grad_phi_p[q][j];
@@ -170,16 +175,20 @@ PSPGSUPGNavierStokesAssemblerCore<dim>::assemble_matrix(
                 }
               if (component_i < dim)
                 {
-                  // The jacobian matrix for the SUPG formulation
-                  // currently does not include the jacobian of the
-                  // stabilization parameter tau. Our experience has shown that
-                  // does not alter the number of newton iteration for
-                  // convergence, but greatly simplifies assembly.
-
                   local_matrix_ij +=
                     tau * (strong_jac * grad_phi_u_i_x_velocity +
                            strong_residual_x_grad_phi_u_i * phi_u_j);
                 }
+
+              // Differentiate tau with respect to the advective velocity.
+              // The mesh or rotor velocity is prescribed, so its variation is
+              // zero. The stabilization viscosity is held fixed here.
+              const double dtau = tau_velocity_derivative[j];
+              if (component_i == dim)
+                local_matrix_ij += dtau * (strong_residual * grad_phi_p_i);
+              else
+                local_matrix_ij +=
+                  dtau * (strong_residual * grad_phi_u_i_x_velocity);
 
               local_matrix_ij *= JxW;
               local_matrix(i, j) += local_matrix_ij;
@@ -2820,6 +2829,18 @@ OutletBoundaryCondition<dim>::assemble_matrix(
 
                                   local_matrix(i, j) += -beta_terms;
                                 }
+                              // Differentiate both velocity factors in the
+                              // backflow stabilization term.
+                              if (normal_outflux < 0. &&
+                                  comp_j < static_cast<unsigned int>(dim))
+                                local_matrix(i, j) -=
+                                  penalty_parameter * beta *
+                                  (scratch_data.face_phi_u[f][q][j] *
+                                   scratch_data.face_normal[f][q]) *
+                                  scratch_data
+                                    .face_velocity_values[f][q][comp_i] *
+                                  scratch_data.face_phi_u[f][q][i][comp_i] *
+                                  JxW;
                             }
                         }
                     }

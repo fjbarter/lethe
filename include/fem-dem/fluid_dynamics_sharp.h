@@ -17,6 +17,7 @@
 #include <fem-dem/cfd_dem_simulation_parameters.h>
 #include <fem-dem/ib_particles_dem.h>
 #include <fem-dem/sharp_ib_periodic_boundaries.h>
+#include <fem-dem/sharp_ib_sign_hysteresis.h>
 #include <fem-dem/sharp_ib_stencil_search.h>
 
 #include <deal.II/base/numbers.h>
@@ -31,6 +32,9 @@
 #include <tuple>
 #include <unordered_set>
 #include <utility>
+// SHARP-TEMPORARY-DEBUG-TOP
+#include <array>
+// SHARP-TEMPORARY-DEBUG-BOTTOM
 #include <vector>
 
 using namespace dealii;
@@ -189,6 +193,9 @@ private:
             force_on_ib();
           }
         integrate_particles();
+        // SHARP-TEMPORARY-DEBUG-TOP
+        debug_trace_particles();
+        // SHARP-TEMPORARY-DEBUG-BOTTOM
         update_precalculations_for_ib();
       }
     // Do the cut cell mapping only if it is the first Newton iteration or
@@ -454,6 +461,77 @@ private:
            std::map<types::global_dof_index, Point<dim>> &support_points);
 
   /**
+   * @brief Decide whether a support point is inside a particle.
+   *
+   * Every inside/outside decision that selects the Sharp-IB equations (cut
+   * cell classification, interior pressure rows and their reference pressure,
+   * cut faces in the force calculation) goes through this function, so that
+   * they all agree. Points far from the surface are classified by the sign of
+   * the level set; points within the hysteresis band keep their previous
+   * classification. See SharpIBSignHysteresis for the reasons.
+   *
+   * @param particle_id Index of the particle.
+   * @param point Support point, in the unshifted mesh frame.
+   * @param levelset Signed distance from the point to the (possibly
+   * periodically shifted) particle surface; negative inside.
+   * @return True if the point is treated as inside the particle.
+   */
+  bool
+  support_point_is_inside(const unsigned int particle_id,
+                          const Point<dim>  &point,
+                          const double       levelset);
+
+  // SHARP-TEMPORARY-DEBUG-TOP
+  // Cluster verification of the sign hysteresis. Remove before merging.
+
+  /**
+   * @brief Record the sign and the applied classification of a support point
+   * near a particle surface, and count how often each changes per time step.
+   *
+   * @param particle_id Index of the particle.
+   * @param point Support point.
+   * @param levelset Level set at the point.
+   * @param inside Classification returned by the sign hysteresis.
+   */
+  void
+  debug_record_classification(const unsigned int particle_id,
+                              const Point<dim>  &point,
+                              const double       levelset,
+                              const bool         inside);
+
+  /**
+   * @brief Print, once per Newton iteration, how many points are held against
+   * their sign and how many changed sign or classification repeatedly during
+   * the current time step (deduplicated over ranks).
+   */
+  void
+  debug_report_classification();
+
+  /**
+   * @brief Print every particle's position, velocity and angular velocity
+   * after integration when SHARP_DEBUG_PARTICLE_TRACE is set.
+   */
+  void
+  debug_trace_particles();
+
+  /// Per-point record kept for points within two bands of a surface.
+  struct DebugClassificationRecord
+  {
+    bool         seen           = false;
+    bool         sign_inside    = false;
+    bool         class_inside   = false;
+    unsigned int sign_switches  = 0;
+    unsigned int class_switches = 0;
+    unsigned int step           = 0;
+    unsigned int newton         = 0;
+    double       levelset       = 0.;
+  };
+  std::map<std::pair<unsigned int, std::array<double, 3>>,
+           DebugClassificationRecord>
+    debug_classification;
+  // SHARP-TEMPORARY-DEBUG-BOTTOM
+
+  /**
    * @brief Check whether a cell is cut by a particle whose geometry does not
    * provide a signed level-set test.
    *
@@ -630,6 +708,41 @@ private:
 
   // Independent of ib_done: cached geometry must never suppress row assembly.
   SharpIBStencilSearch<dim> periodic_stencil_search;
+
+  /// Inside/outside classification of support points with a hysteresis band
+  /// around each particle surface. Reinitialized whenever the DoFs change.
+  SharpIBSignHysteresis<dim> sign_hysteresis;
+
+  /**
+   * Half-width of the sign hysteresis band, as a fraction of the minimal cell
+   * size h. A support point within this distance of a particle surface keeps
+   * its previous inside/outside classification; see SharpIBSignHysteresis for
+   * why this is needed for the coupled Newton iteration to converge.
+   *
+   * Why 1e-2: the band must be wider than the distance a particle moves in
+   * response to the force jump caused by one node changing side. That
+   * distance was measured at about 6e-6 h (0.03 nm for h = 5 um and
+   * dt = 4e-7 s), so 1e-2 h leaves a margin of more than three orders of
+   * magnitude. At the same time, treating a node up to 1e-2 h on the wrong
+   * side of the surface is a perturbation far smaller than the error of the
+   * Sharp-IB stencils.
+   *
+   * OPEN QUESTION: should this be a user parameter instead of a constant?
+   * - For: the distance above grows roughly like dt^2 * (force jump) /
+   *   (particle mass), so simulations with much larger time steps, lighter
+   *   particles or steeper pressure gradients could need a wider band. A
+   *   parameter would also allow switching the hysteresis off (band = 0) to
+   *   diagnose a case.
+   * - Against: this is a numerical safeguard, not a modelling choice. A value
+   *   that is too small silently brings back the convergence failure, and a
+   *   value comparable to h degrades the geometric accuracy. No case seen so
+   *   far needs anything other than the default.
+   * Not yet decided. If it becomes a parameter, declare it in
+   * Parameters::IBParticles, document it in
+   * doc/source/parameters/sharp-immersed-boundary/, and add a MAJOR release
+   * note.
+   */
+  static constexpr double sign_hysteresis_band_fraction = 1e-2;
 
 
   /**

@@ -1,0 +1,55 @@
+
+DEAL::dim = 2
+DEAL::Oscillation around the node, starting outside
+DEAL::  phi/band = 0.5 -> outside
+DEAL::  phi/band = -0.2 -> outside
+DEAL::  phi/band = 0.3 -> outside
+DEAL::  phi/band = -0.2 -> outside
+DEAL::  phi/band = 0.3 -> outside
+DEAL::  phi/band = -0.2 -> outside
+DEAL::Surface passing the node
+DEAL::  phi/band = 0.5 -> outside
+DEAL::  phi/band = -0.5 -> outside
+DEAL::  phi/band = -1.5 -> inside
+DEAL::  phi/band = -0.5 -> inside
+DEAL::  phi/band = 0.5 -> inside
+DEAL::  phi/band = 1.5 -> outside
+DEAL::First evaluation inside the band
+DEAL::  phi/band = -0.5 -> inside
+DEAL::Evaluation after a skipped pass
+DEAL::  phi/band = 0.5 -> outside
+DEAL::Same pass: outside, distant image: outside, again: outside
+DEAL::Particle 0 at phi/band = -0.5: outside, particle 1 at phi/band = 0.5: inside
+DEAL::Zero band
+DEAL::  phi = 1.00000e-12 -> outside
+DEAL::  phi = 0.00000 -> inside
+DEAL::  phi = 1.00000e-12 -> outside
+DEAL::  phi = -1.00000e-12 -> inside
+DEAL::Remembered points with a zero band: 0
+DEAL::dim = 3
+DEAL::Oscillation around the node, starting outside
+DEAL::  phi/band = 0.5 -> outside
+DEAL::  phi/band = -0.2 -> outside
+DEAL::  phi/band = 0.3 -> outside
+DEAL::  phi/band = -0.2 -> outside
+DEAL::  phi/band = 0.3 -> outside
+DEAL::  phi/band = -0.2 -> outside
+DEAL::Surface passing the node
+DEAL::  phi/band = 0.5 -> outside
+DEAL::  phi/band = -0.5 -> outside
+DEAL::  phi/band = -1.5 -> inside
+DEAL::  phi/band = -0.5 -> inside
+DEAL::  phi/band = 0.5 -> inside
+DEAL::  phi/band = 1.5 -> outside
+DEAL::First evaluation inside the band
+DEAL::  phi/band = -0.5 -> inside
+DEAL::Evaluation after a skipped pass
+DEAL::  phi/band = 0.5 -> outside
+DEAL::Same pass: outside, distant image: outside, again: outside
+DEAL::Particle 0 at phi/band = -0.5: outside, particle 1 at phi/band = 0.5: inside
+DEAL::Zero band
+DEAL::  phi = 1.00000e-12 -> outside
+DEAL::  phi = 0.00000 -> inside
+DEAL::  phi = 1.00000e-12 -> outside
+DEAL::  phi = -1.00000e-12 -> inside
+DEAL::Remembered points with a zero band: 0

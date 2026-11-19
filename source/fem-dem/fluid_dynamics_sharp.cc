@@ -44,6 +44,11 @@
 #include <numbers>
 #include <stdexcept>
 #include <tuple>
+// SHARP-TEMPORARY-DEBUG-TOP
+#include <cstdlib>
+#include <iomanip>
+#include <sstream>
+// SHARP-TEMPORARY-DEBUG-BOTTOM
 
 // Constructor for class FluidDynamicsSharp
 template <int dim>
@@ -57,6 +62,177 @@ FluidDynamicsSharp<dim>::FluidDynamicsSharp(
 
 template <int dim>
 FluidDynamicsSharp<dim>::~FluidDynamicsSharp() = default;
+
+
+template <int dim>
+bool
+FluidDynamicsSharp<dim>::support_point_is_inside(const unsigned int particle_id,
+                                                 const Point<dim>  &point,
+                                                 const double       levelset)
+{
+  const bool inside = sign_hysteresis.is_inside(particle_id, point, levelset);
+  // SHARP-TEMPORARY-DEBUG-TOP
+  debug_record_classification(particle_id, point, levelset, inside);
+  // SHARP-TEMPORARY-DEBUG-BOTTOM
+  return inside;
+}
+
+// SHARP-TEMPORARY-DEBUG-TOP
+template <int dim>
+void
+FluidDynamicsSharp<dim>::debug_record_classification(
+  const unsigned int particle_id,
+  const Point<dim>  &point,
+  const double       levelset,
+  const bool         inside)
+{
+  // Only points that the hysteresis can affect are recorded.
+  if (std::abs(levelset) > 2. * sign_hysteresis.get_band())
+    return;
+
+  std::array<double, 3> coordinates{};
+  for (unsigned int d = 0; d < dim; ++d)
+    coordinates[d] = point[d];
+
+  const unsigned int step   = this->simulation_control->get_iteration_number();
+  const unsigned int newton = this->get_current_newton_iteration();
+  const bool         sign_inside = levelset <= 0.;
+
+  auto      &record = debug_classification[{particle_id, coordinates}];
+  const bool seen   = record.seen;
+  if (seen && record.step != step)
+    {
+      record.sign_switches  = 0;
+      record.class_switches = 0;
+    }
+  if (seen && record.sign_inside != sign_inside)
+    ++record.sign_switches;
+  if (seen && record.class_inside != inside)
+    ++record.class_switches;
+  record.seen         = true;
+  record.sign_inside  = sign_inside;
+  record.class_inside = inside;
+  record.step         = step;
+  record.newton       = newton;
+  record.levelset     = levelset;
+}
+
+template <int dim>
+void
+FluidDynamicsSharp<dim>::debug_report_classification()
+{
+  const unsigned int step   = this->simulation_control->get_iteration_number();
+  const unsigned int newton = this->get_current_newton_iteration();
+  const double h = sign_hysteresis.get_band() / sign_hysteresis_band_fraction;
+
+  // Rows sent to rank 0: particle, x, y, z, level set, held (0/1), sign
+  // switches and classification switches during this time step. Only
+  // interesting points are sent, so the message stays small.
+  std::vector<std::array<double, 8>> local_rows;
+  for (auto it = debug_classification.begin();
+       it != debug_classification.end();)
+    {
+      const auto &[key, record] = *it;
+      if (record.step != step)
+        {
+          // Points not seen during this time step are no longer near a
+          // surface; forget them to keep the map small.
+          it = debug_classification.erase(it);
+          continue;
+        }
+      const bool held = record.sign_inside != record.class_inside;
+      if (record.newton == newton &&
+          (held || record.sign_switches >= 2 || record.class_switches >= 2))
+        local_rows.push_back(
+          std::array<double, 8>{{static_cast<double>(key.first),
+                                 key.second[0],
+                                 key.second[1],
+                                 key.second[2],
+                                 record.levelset,
+                                 held ? 1. : 0.,
+                                 static_cast<double>(record.sign_switches),
+                                 static_cast<double>(record.class_switches)}});
+      ++it;
+    }
+
+  const auto gathered =
+    Utilities::MPI::gather(this->mpi_communicator, local_rows, 0);
+  if (Utilities::MPI::this_mpi_process(this->mpi_communicator) != 0)
+    return;
+
+  // Ghost points are evaluated on several ranks with identical results.
+  std::map<std::array<double, 4>, std::array<double, 4>> unique_rows;
+  for (const auto &rank_rows : gathered)
+    for (const auto &row : rank_rows)
+      unique_rows[std::array<double, 4>{{row[0], row[1], row[2], row[3]}}] =
+        std::array<double, 4>{{row[4], row[5], row[6], row[7]}};
+
+  unsigned int n_held = 0, n_sign_repeat = 0, n_class_repeat = 0;
+  double       max_held_levelset = 0.;
+  for (const auto &[key, values] : unique_rows)
+    {
+      if (values[1] > 0.5)
+        {
+          ++n_held;
+          max_held_levelset = std::max(max_held_levelset, std::abs(values[0]));
+        }
+      if (values[2] >= 2.)
+        ++n_sign_repeat;
+      if (values[3] >= 2.)
+        ++n_class_repeat;
+    }
+
+  std::ostringstream summary;
+  summary << std::scientific << std::setprecision(3)
+          << "[SHARP-TEMP] sign_hysteresis step=" << step
+          << " newton=" << newton
+          << " band_over_h=" << sign_hysteresis_band_fraction
+          << " held=" << n_held
+          << " max_held_phi_over_h=" << max_held_levelset / h
+          << " sign_repeat=" << n_sign_repeat
+          << " class_repeat=" << n_class_repeat;
+  this->pcout << summary.str() << std::endl;
+
+  // Details of the first few points that changed side repeatedly.
+  constexpr unsigned int max_details = 5;
+  unsigned int           n_details   = 0;
+  for (const auto &[key, values] : unique_rows)
+    if ((values[2] >= 2. || values[3] >= 2.) && n_details++ < max_details)
+      {
+        std::ostringstream detail;
+        detail << std::scientific << std::setprecision(6)
+               << "[SHARP-TEMP] sign_hysteresis_point step=" << step
+               << " newton=" << newton
+               << " particle=" << static_cast<unsigned int>(key[0])
+               << " point=" << key[1] << ',' << key[2] << ',' << key[3]
+               << " phi_over_h=" << values[0] / h
+               << " held=" << static_cast<unsigned int>(values[1])
+               << " sign_switches=" << static_cast<unsigned int>(values[2])
+               << " class_switches=" << static_cast<unsigned int>(values[3]);
+        this->pcout << detail.str() << std::endl;
+      }
+}
+
+template <int dim>
+void
+FluidDynamicsSharp<dim>::debug_trace_particles()
+{
+  if (std::getenv("SHARP_DEBUG_PARTICLE_TRACE") == nullptr)
+    return;
+  for (unsigned int p = 0; p < particles.size(); ++p)
+    {
+      std::ostringstream trace;
+      trace << std::scientific << std::setprecision(15)
+            << "[SHARP-TEMP] particle_trace step="
+            << this->simulation_control->get_iteration_number()
+            << " newton=" << this->get_current_newton_iteration()
+            << " particle=" << p << " position=" << particles[p].position
+            << " velocity=" << particles[p].velocity
+            << " omega=" << particles[p].omega;
+      this->pcout << trace.str() << std::endl;
+    }
+}
+// SHARP-TEMPORARY-DEBUG-BOTTOM
 
 
 template <int dim>
@@ -100,6 +276,12 @@ template <int dim>
 void
 FluidDynamicsSharp<dim>::generate_cut_cells_map()
 {
+  // This function runs once per Newton iteration (or once per time step with
+  // explicit position integration). Each run is one evaluation pass of the
+  // sign hysteresis: classifications made in the previous pass are kept for
+  // points that are still within the band.
+  sign_hysteresis.start_new_pass();
+
   // Potential amelioration of this function. This function could try to use the
   // information of the previous cut cell mapping as an initial guess of the new
   // cell mapping by looking at the parent level of the cells to look for new
@@ -241,9 +423,12 @@ FluidDynamicsSharp<dim>::generate_cut_cells_map()
                         {
                           if (0 == this->fe->system_to_component_index(j).first)
                             {
-                              if (particles[p].get_levelset(
+                              if (support_point_is_inside(
+                                    p,
                                     support_points[local_dof_indices[j]],
-                                    cell) <= 0)
+                                    particles[p].get_levelset(
+                                      support_points[local_dof_indices[j]],
+                                      cell)))
                                 {
                                   ++nb_dof_inside;
                                   if (periodic_shift.norm_square() == 0.0)
@@ -344,14 +529,24 @@ FluidDynamicsSharp<dim>::generate_cut_cells_map()
                     }
                 }
 
-              // We loop on every face of the cell, and if the face is at a
-              // boundary we count it as constrained.
+              // Count boundary DoFs as constrained, except on a weak outlet
+              // in periodic Sharp simulations. The outlet does not prescribe
+              // the velocity and must not make a fluid cell overconstrained.
               size_t nb_faces = cell->n_faces();
               for (unsigned int f = 0; f < nb_faces; ++f)
                 {
                   const auto face = cell->face(f);
                   if (face->at_boundary())
                     {
+                      const auto &types =
+                        this->simulation_parameters.boundary_conditions.type;
+                      const auto boundary_type =
+                        types.find(face->boundary_id());
+                      if (sharp_ib_periodic_boundaries.is_periodic_enabled() &&
+                          boundary_type != types.end() &&
+                          boundary_type->second ==
+                            BoundaryConditions::BoundaryType::outlet)
+                        continue;
                       face->get_dof_indices(local_face_dof_indices);
                       for (const auto &id : local_face_dof_indices)
                         {
@@ -1378,8 +1573,11 @@ FluidDynamicsSharp<dim>::force_on_ib()
                           // Count the number of DOFs that are inside
                           // of the particles. If all the DOfs are on one side
                           // the cell is not cut by the boundary.
-                          if (particles[p].get_levelset(
-                                support_points[dof_index], cell) <= 0)
+                          if (support_point_is_inside(
+                                p,
+                                support_points[dof_index],
+                                particles[p].get_levelset(
+                                  support_points[dof_index], cell)))
                             ++nb_dof_inside;
                         }
 
@@ -2559,9 +2757,12 @@ FluidDynamicsSharp<dim>::integrate_particles()
                  particles[p].fluid_forces + gravity_buoyancy_force) /
                 particles[p].mass;
 
-              double inverse_of_relaxation_coefficient_velocity =
+
+              const double initial_inverse_relaxation_velocity =
                 -bdf_coefs[0] -
                 0.5 * volume * fluid_density / particles[p].mass / dt + DBL_MIN;
+              double inverse_of_relaxation_coefficient_velocity =
+                initial_inverse_relaxation_velocity;
 
               // Evaluate the relaxation parameter using a generalization of the
               // secant method.
@@ -2571,14 +2772,35 @@ FluidDynamicsSharp<dim>::integrate_particles()
                     (particles[p].velocity - particles[p].velocity_iter);
                   auto vector_of_residual_variation =
                     residual_velocity - particles[p].previous_velocity_residual;
-                  double dot_product_of_the_variation_vectors =
+                  const double dot_product_of_the_variation_vectors =
                     scalar_product(vector_of_velocity_variation,
                                    vector_of_residual_variation);
-                  inverse_of_relaxation_coefficient_velocity =
-                    1 / (dot_product_of_the_variation_vectors /
-                           (vector_of_residual_variation.norm_square()) +
-                         DBL_MIN);
+                  const double residual_variation_squared =
+                    vector_of_residual_variation.norm_square();
+                  if (std::isfinite(dot_product_of_the_variation_vectors) &&
+                      std::isfinite(residual_variation_squared) &&
+                      dot_product_of_the_variation_vectors != 0. &&
+                      residual_variation_squared > 0.)
+                    inverse_of_relaxation_coefficient_velocity =
+                      residual_variation_squared /
+                      dot_product_of_the_variation_vectors;
                 }
+
+              // A particle's residual also changes when the fluid and other
+              // particles change, so its scalar secant can point uphill or
+              // suggest an almost zero or excessively large correction. Use
+              // the added-mass estimate when the secant is outside these
+              // bounds.
+              const double initial_inverse_magnitude =
+                std::abs(initial_inverse_relaxation_velocity);
+              if (!std::isfinite(inverse_of_relaxation_coefficient_velocity) ||
+                  inverse_of_relaxation_coefficient_velocity >= 0. ||
+                  std::abs(inverse_of_relaxation_coefficient_velocity) >
+                    100. * initial_inverse_magnitude ||
+                  std::abs(inverse_of_relaxation_coefficient_velocity) <
+                    0.1 * initial_inverse_magnitude)
+                inverse_of_relaxation_coefficient_velocity =
+                  initial_inverse_relaxation_velocity;
               // Relaxation parameter for the particle dynamics.
               double local_alpha = 1.;
               // We keep in memory the state of the particle before the update
@@ -3823,9 +4045,11 @@ FluidDynamicsSharp<dim>::sharp_edge()
                     {
                       const int component_i =
                         this->fe->system_to_component_index(i).first;
-                      bool dof_is_inside =
+                      bool dof_is_inside = support_point_is_inside(
+                        ib_particle_id,
+                        support_points[local_dof_indices[i]],
                         particles[ib_particle_id].get_levelset(
-                          support_points[local_dof_indices[i]], cell_cut) <= 0;
+                          support_points[local_dof_indices[i]], cell_cut));
 
                       // If multiple particles cut the cell_cut, we treat the
                       // dof of pressure as a dummy dof. We don't use them to
@@ -4220,9 +4444,12 @@ FluidDynamicsSharp<dim>::sharp_edge()
                                   // Check if the dof is inside or outside of
                                   // the particle.
                                   bool dof_is_inside_p =
-                                    particles[ib_particle_id].get_levelset(
+                                    support_point_is_inside(
+                                      ib_particle_id,
                                       support_points[local_dof_indices[k]],
-                                      cell_cut) <= 0;
+                                      particles[ib_particle_id].get_levelset(
+                                        support_points[local_dof_indices[k]],
+                                        cell_cut));
                                   const int component_k =
                                     this->fe->system_to_component_index(k)
                                       .first;
@@ -4372,6 +4599,9 @@ FluidDynamicsSharp<dim>::sharp_edge()
 
   this->system_rhs.compress(VectorOperation::insert);
   this->system_matrix.compress(VectorOperation::add);
+  // SHARP-TEMPORARY-DEBUG-TOP
+  debug_report_classification();
+  // SHARP-TEMPORARY-DEBUG-BOTTOM
 }
 
 
@@ -5501,6 +5731,12 @@ FluidDynamicsSharp<dim>::setup_dofs_fd()
 {
   // DoF redistribution also invalidates cached cells without a mesh change.
   periodic_stencil_search.reinit(*this->dof_handler);
+
+  // The remembered classifications refer to the old support points, so they
+  // are discarded. The band is a fixed fraction of the smallest cell size.
+  const double h = GridTools::minimal_cell_diameter(*this->triangulation) /
+                   std::sqrt(static_cast<double>(dim));
+  sign_hysteresis.reinit(sign_hysteresis_band_fraction * h);
   // Call the base class to do all standard setup (DoF distribution,
   // constraints, vector reinit, sparsity pattern, matrix reinit).
   FluidDynamicsMatrixBased<dim>::setup_dofs_fd();
@@ -5509,6 +5745,18 @@ FluidDynamicsSharp<dim>::setup_dofs_fd()
   // pattern (built with keep_constrained_dofs=false) is sufficient.
   if (!sharp_ib_periodic_boundaries.is_periodic_enabled())
     return;
+
+  // Sharp stencils may use DoFs on ghost cells. Import their constraints from
+  // their owners before constructing the sparsity pattern or expanding stencil
+  // columns, so all ranks apply the same periodic and boundary constraints.
+  this->zero_constraints.make_consistent_in_parallel(
+    this->locally_owned_dofs,
+    this->locally_relevant_dofs,
+    this->mpi_communicator);
+  this->nonzero_constraints.make_consistent_in_parallel(
+    this->locally_owned_dofs,
+    this->locally_relevant_dofs,
+    this->mpi_communicator);
 
   // The base Setup DOFs scope has ended; report this rebuild separately.
   TimerOutput::Scope timer(this->computing_timer,
