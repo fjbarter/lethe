@@ -8,6 +8,9 @@
 #include <solvers/navier_stokes_assemblers.h>
 #include <solvers/stabilization.h>
 
+#include <algorithm>
+#include <cmath>
+
 template <int dim>
 void
 PSPGSUPGNavierStokesAssemblerCore<dim>::assemble_matrix(
@@ -2770,6 +2773,73 @@ PartialSlipDirichletBoundaryCondition<dim>::assemble_rhs(
 template class PartialSlipDirichletBoundaryCondition<2>;
 template class PartialSlipDirichletBoundaryCondition<3>;
 
+namespace
+{
+  /**
+   * @brief Inflow part of the outlet normal velocity, min(0, u.n), used by the
+   * backflow stabilization, optionally smoothed (EXPERIMENTAL).
+   *
+   * min(0, u.n) has a kink at u.n = 0. Where the converged flow has u.n close
+   * to zero on part of an outlet (for example where a wall sliding along the
+   * outlet meets it), Newton iterates keep crossing the kink, the residual is
+   * not differentiable there, and the iteration can stall. With a smoothing
+   * velocity epsilon > 0 the kink is replaced by the smooth curve
+   * 0.5 * (u.n - sqrt((u.n)^2 + epsilon^2)), which tends to min(0, u.n) when
+   * |u.n| >> epsilon.
+   *
+   * @param normal_velocity u.n at the quadrature point.
+   * @param smoothing_velocity epsilon; zero gives exactly min(0, u.n).
+   * @return The (smoothed) inflow normal velocity, always <= 0.
+   */
+  inline double
+  backflow_normal_velocity(const double normal_velocity,
+                           const double smoothing_velocity)
+  {
+    if (smoothing_velocity <= 0.)
+      return std::min(0., normal_velocity);
+    return 0.5 *
+           (normal_velocity - std::hypot(normal_velocity, smoothing_velocity));
+  }
+
+  /**
+   * @brief Derivative of backflow_normal_velocity() with respect to u.n.
+   *
+   * @param normal_velocity u.n at the quadrature point.
+   * @param smoothing_velocity epsilon; zero gives the step 1 (u.n < 0) or 0.
+   * @return The slope, between 0 and 1.
+   */
+  inline double
+  backflow_normal_velocity_slope(const double normal_velocity,
+                                 const double smoothing_velocity)
+  {
+    if (smoothing_velocity <= 0.)
+      return normal_velocity < 0. ? 1. : 0.;
+    return 0.5 * (1. - normal_velocity /
+                         std::hypot(normal_velocity, smoothing_velocity));
+  }
+
+  /**
+   * @brief Return the backflow smoothing velocity of an outlet, or zero if
+   * none was set (for example in boundary conditions built in tests).
+   *
+   * @param boundary_conditions Navier-Stokes boundary conditions.
+   * @param boundary_id Id of the outlet.
+   * @return The smoothing velocity epsilon.
+   */
+  template <int dim>
+  double
+  get_backflow_smoothing_velocity(
+    const BoundaryConditions::NSBoundaryConditions<dim> &boundary_conditions,
+    const types::boundary_id                             boundary_id)
+  {
+    const auto it =
+      boundary_conditions.backflow_smoothing_velocity.find(boundary_id);
+    return it == boundary_conditions.backflow_smoothing_velocity.end() ?
+             0. :
+             it->second;
+  }
+} // namespace
+
 template <int dim>
 void
 OutletBoundaryCondition<dim>::assemble_matrix(
@@ -2798,19 +2868,26 @@ OutletBoundaryCondition<dim>::assemble_matrix(
               BoundaryConditions::BoundaryType::outlet)
             {
               const double beta = boundary_conditions.beta.at(boundary_id);
+              const double smoothing_velocity =
+                get_backflow_smoothing_velocity(boundary_conditions,
+                                                boundary_id);
 
               // Assemble the matrix of the BC
               for (unsigned int q = 0; q < scratch_data.n_faces_q_points; ++q)
                 {
                   const double JxW = scratch_data.face_JxW[f][q];
+                  const double normal_velocity =
+                    scratch_data.face_velocity_values[f][q] *
+                    scratch_data.face_normal[f][q];
+                  const double normal_outflux =
+                    backflow_normal_velocity(normal_velocity,
+                                             smoothing_velocity);
+                  const double normal_outflux_slope =
+                    backflow_normal_velocity_slope(normal_velocity,
+                                                   smoothing_velocity);
                   for (const unsigned int i :
                        scratch_data.fe_face_values.dof_indices())
                     {
-                      double normal_outflux =
-                        std::min(0.,
-                                 scratch_data.face_velocity_values[f][q] *
-                                   scratch_data.face_normal[f][q]);
-
                       const auto comp_i = fe.system_to_component_index(i).first;
                       if (comp_i < dim)
                         {
@@ -2830,11 +2907,13 @@ OutletBoundaryCondition<dim>::assemble_matrix(
                                   local_matrix(i, j) += -beta_terms;
                                 }
                               // Differentiate both velocity factors in the
-                              // backflow stabilization term.
-                              if (normal_outflux < 0. &&
+                              // backflow stabilization term. The slope is 1 or
+                              // 0 without smoothing.
+                              if (normal_outflux_slope > 0. &&
                                   comp_j < static_cast<unsigned int>(dim))
                                 local_matrix(i, j) -=
                                   penalty_parameter * beta *
+                                  normal_outflux_slope *
                                   (scratch_data.face_phi_u[f][q][j] *
                                    scratch_data.face_normal[f][q]) *
                                   scratch_data
@@ -2879,21 +2958,22 @@ OutletBoundaryCondition<dim>::assemble_rhs(
               BoundaryConditions::BoundaryType::outlet)
             {
               const double beta = boundary_conditions.beta.at(boundary_id);
+              const double smoothing_velocity =
+                get_backflow_smoothing_velocity(boundary_conditions,
+                                                boundary_id);
 
               for (unsigned int q = 0; q < scratch_data.n_faces_q_points; ++q)
                 {
                   const double JxW = scratch_data.face_JxW[f][q];
+                  // The backflow term only acts where fluid enters through
+                  // the outlet (u.n < 0); see backflow_normal_velocity().
+                  const double normal_outflux = backflow_normal_velocity(
+                    scratch_data.face_velocity_values[f][q] *
+                      scratch_data.face_normal[f][q],
+                    smoothing_velocity);
                   for (const unsigned int i :
                        scratch_data.fe_face_values.dof_indices())
                     {
-                      // Calculate beta term depending on the
-                      // value of  u*n. If it is positive (outgoing
-                      // flow) then
-                      double normal_outflux =
-                        std::min(0.,
-                                 (scratch_data.face_velocity_values[f][q] *
-                                  scratch_data.face_normal[f][q]));
-
                       const auto comp_i = fe.system_to_component_index(i).first;
                       if (comp_i < dim)
                         {

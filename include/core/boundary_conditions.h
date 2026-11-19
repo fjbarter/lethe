@@ -161,6 +161,12 @@ namespace BoundaryConditions
     ///  outlets for a corresponding id
     std::map<types::boundary_id, double> beta;
 
+    /// EXPERIMENTAL. Map containing, for each outlet, the velocity scale over
+    /// which the kink of the backflow term min(0, u.n) is smoothed. Zero keeps
+    /// the original non-smooth term. Only used by the matrix-based
+    /// Navier-Stokes outlet assembler (OutletBoundaryCondition).
+    std::map<types::boundary_id, double> backflow_smoothing_velocity;
+
     /// Map containing the boundary layer thickness tangent component parameter
     /// for partial slip for a corresponding id Map containing Dirichlet BCs for
     /// a corresponding boundary id
@@ -415,6 +421,15 @@ namespace BoundaryConditions
       "Penalty parameter for weak boundary condition imposed through Nitsche's method or outlets");
 
     prm.declare_entry(
+      "backflow smoothing velocity",
+      "0",
+      Patterns::Double(0.),
+      "EXPERIMENTAL. Velocity scale over which the kink of the outlet backflow "
+      "term min(0, u.n) is smoothed, so that Newton's method converges when "
+      "u.n is close to zero on part of the outlet. 0 keeps the original "
+      "non-smooth term. Only used by the matrix-based solvers.");
+
+    prm.declare_entry(
       "boundary layer thickness",
       "0",
       Patterns::Double(),
@@ -555,6 +570,8 @@ namespace BoundaryConditions
             prm.leave_subsection();
           }
         this->beta[boundary_id] = prm.get_double("beta");
+        this->backflow_smoothing_velocity[boundary_id] =
+          prm.get_double("backflow smoothing velocity");
         this->boundary_layer_thickness[boundary_id] =
           prm.get_double("boundary layer thickness");
       }
