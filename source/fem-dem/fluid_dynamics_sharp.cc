@@ -48,6 +48,7 @@
 #include <cstdlib>
 #include <iomanip>
 #include <sstream>
+#include <string>
 // SHARP-TEMPORARY-DEBUG-BOTTOM
 
 // Constructor for class FluidDynamicsSharp
@@ -1717,6 +1718,16 @@ FluidDynamicsSharp<dim>::force_on_ib()
                                                   cell,
                                                   point_to_find_cell,
                                                   force_periodic_shift);
+                                              // SHARP-TEMPORARY-DEBUG-TOP
+                                              debug_check_stencil_query(
+                                                "force",
+                                                p,
+                                                local_face_dof_indices[i],
+                                                support_points
+                                                  [local_face_dof_indices[i]],
+                                                point_to_find_cell,
+                                                cell);
+                                              // SHARP-TEMPORARY-DEBUG-BOTTOM
                                               if (cell_2 ==
                                                   this->dof_handler->end())
                                                 cell_2 = cell;
@@ -4214,10 +4225,21 @@ FluidDynamicsSharp<dim>::sharp_edge()
                           (void)particle_close_to_wall;
                           if (sharp_ib_periodic_boundaries
                                 .is_periodic_enabled())
-                            stencil_cell = find_periodic_stencil_cell(
-                              cell_cut,
-                              point_to_find_cell,
-                              stencil_periodic_shift);
+                            {
+                              stencil_cell = find_periodic_stencil_cell(
+                                cell_cut,
+                                point_to_find_cell,
+                                stencil_periodic_shift);
+                              // SHARP-TEMPORARY-DEBUG-TOP
+                              debug_check_stencil_query(
+                                "sharp_edge",
+                                ib_particle_id,
+                                local_dof_indices[i],
+                                support_points[local_dof_indices[i]],
+                                point_to_find_cell,
+                                cell_cut);
+                              // SHARP-TEMPORARY-DEBUG-BOTTOM
+                            }
                           else
                             {
                               try
@@ -4601,6 +4623,7 @@ FluidDynamicsSharp<dim>::sharp_edge()
   this->system_matrix.compress(VectorOperation::add);
   // SHARP-TEMPORARY-DEBUG-TOP
   debug_report_classification();
+  debug_report_stencil_queries();
   // SHARP-TEMPORARY-DEBUG-BOTTOM
 }
 
@@ -5840,6 +5863,114 @@ FluidDynamicsSharp<dim>::initialize_sharp_ib_periodic_configuration()
 }
 
 
+// SHARP-TEMPORARY-DEBUG-TOP
+template <int dim>
+void
+FluidDynamicsSharp<dim>::debug_check_stencil_query(
+  const char                                           *caller,
+  const unsigned int                                    particle_id,
+  const types::global_dof_index                         dof,
+  const Point<dim>                                     &dof_point,
+  const Point<dim>                                     &query_point,
+  const typename DoFHandler<dim>::active_cell_iterator &seed)
+{
+  ++debug_stencil_counts_local[0];
+
+  // The query is dof + (dof - closest surface point) / 16, so for a DoF of a
+  // cut cell it lies within about 0.11 h of the DoF. A query far from its DoF
+  // means the closest surface point was taken on the wrong particle image.
+  const double h = seed->diameter() / std::sqrt(static_cast<double>(dim));
+  const double offset_over_h = query_point.distance(dof_point) / h;
+  const bool   far_query     = offset_over_h > 0.5;
+  if (far_query)
+    ++debug_stencil_counts_local[1];
+  if (debug_last_stencil_unavailable)
+    ++debug_stencil_counts_local[2];
+  if (!(far_query || debug_last_stencil_unavailable))
+    return;
+
+  // Print full details for the first few events on each rank.
+  constexpr unsigned int max_events_per_rank = 10;
+  if (debug_stencil_events_printed >= max_events_per_rank)
+    return;
+  ++debug_stencil_events_printed;
+
+  // Where the wrapped query lands relative to the DoF's own periodic image:
+  // close (< 0.5 h) means a neighbouring cell across the seam that is missing
+  // from this rank's ghost layer; far means a wrong-frame query.
+  const Tensor<1, dim> wrap_shift = debug_last_stencil_wrapped - query_point;
+  const Point<dim>     dof_image  = dof_point + wrap_shift;
+  const double         wrapped_to_dof_image_over_h =
+    debug_last_stencil_wrapped.distance(dof_image) / h;
+
+  // Visibility of the cells around the DoF, and of the DoF's periodic image.
+  unsigned int n_visible_around_dof = 0, n_visible_around_image = 0;
+  for (const auto &cell : this->dof_handler->active_cell_iterators())
+    if (!cell->is_artificial())
+      {
+        for (const auto v : cell->vertex_indices())
+          {
+            if (cell->vertex(v).distance(dof_point) < 1e-6 * h)
+              ++n_visible_around_dof;
+            if (wrap_shift.norm() > 0. &&
+                cell->vertex(v).distance(dof_image) < 1e-6 * h)
+              ++n_visible_around_image;
+          }
+      }
+
+  const std::string verdict =
+    !debug_last_stencil_unavailable ?
+      "far_query_found_cell" :
+      (wrapped_to_dof_image_over_h < 0.5 ? "ghost_layer_gap_across_seam" :
+                                           "far_query_unavailable");
+
+  std::ostringstream event;
+  event << std::scientific << std::setprecision(9)
+        << "[SHARP-TEMP] stencil_event verdict=" << verdict
+        << " caller=" << caller
+        << " step=" << this->simulation_control->get_iteration_number()
+        << " newton=" << this->get_current_newton_iteration()
+        << " rank=" << Utilities::MPI::this_mpi_process(this->mpi_communicator)
+        << " particle=" << particle_id
+        << " particle_position_in_frame=" << particles[particle_id].position
+        << " particle_radius=" << particles[particle_id].radius
+        << " particle_velocity=" << particles[particle_id].velocity
+        << " particle_omega=" << particles[particle_id].omega << " dof=" << dof
+        << " dof_owned=" << this->locally_owned_dofs.is_element(dof)
+        << " dof_constrained=" << this->zero_constraints.is_constrained(dof)
+        << " dof_point=" << dof_point
+        << " levelset_at_dof=" << particles[particle_id].get_levelset(dof_point)
+        << " query=" << query_point << " wrapped=" << debug_last_stencil_wrapped
+        << " offset_over_h=" << offset_over_h
+        << " wrapped_to_dof_image_over_h=" << wrapped_to_dof_image_over_h
+        << " seed_center=" << seed->center()
+        << " seed_owned=" << seed->is_locally_owned()
+        << " seed_ghost=" << seed->is_ghost()
+        << " visible_cell_vertices_at_dof=" << n_visible_around_dof
+        << " visible_cell_vertices_at_dof_image=" << n_visible_around_image
+        << " (8 each means all surrounding cells are visible)";
+  std::cout << event.str() << std::endl;
+}
+
+template <int dim>
+void
+FluidDynamicsSharp<dim>::debug_report_stencil_queries()
+{
+  // Collective: summed over ranks, printed only if something unusual happened.
+  unsigned int totals[3];
+  for (unsigned int k = 0; k < 3; ++k)
+    totals[k] = Utilities::MPI::sum(debug_stencil_counts_local[k],
+                                    this->mpi_communicator);
+  if (totals[1] > 0 || totals[2] > 0)
+    this->pcout << "[SHARP-TEMP] stencil_summary step="
+                << this->simulation_control->get_iteration_number()
+                << " newton=" << this->get_current_newton_iteration()
+                << " searches=" << totals[0] << " far_queries=" << totals[1]
+                << " periodic_fallbacks=" << totals[2] << std::endl;
+  debug_stencil_counts_local = {};
+}
+// SHARP-TEMPORARY-DEBUG-BOTTOM
+
 template <int dim>
 typename DoFHandler<dim>::active_cell_iterator
 FluidDynamicsSharp<dim>::find_periodic_stencil_cell(
@@ -5854,9 +5985,23 @@ FluidDynamicsSharp<dim>::find_periodic_stencil_cell(
   shift = wrapped - point;
   const auto cell =
     periodic_stencil_search.find(wrapped, seed, vertices_to_cell);
-  AssertThrow(cell != this->dof_handler->end() || wrapped == point,
-              ExcMessage(
-                "Periodic Sharp stencil is unavailable on this rank."));
+  // SHARP-TEMPORARY-DEBUG-TOP
+  debug_last_stencil_wrapped     = wrapped;
+  debug_last_stencil_unavailable = false;
+  // SHARP-TEMPORARY-DEBUG-BOTTOM
+  if (cell == this->dof_handler->end() && !(wrapped == point))
+    {
+      // The point crossed the periodic seam and its wrapped image lies in a
+      // cell that this rank cannot see (neither owned nor ghost). Rather than
+      // abort, report "no stencil cell", exactly as for a point blocked by a
+      // wall: the caller then falls back to the cut cell itself and imposes
+      // the boundary value directly for this DoF. The shift must be reset,
+      // since no cell across the seam is used.
+      shift = Tensor<1, dim>();
+      // SHARP-TEMPORARY-DEBUG-TOP
+      debug_last_stencil_unavailable = true;
+      // SHARP-TEMPORARY-DEBUG-BOTTOM
+    }
   return cell;
 }
 

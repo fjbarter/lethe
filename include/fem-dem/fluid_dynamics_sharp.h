@@ -508,6 +508,40 @@ private:
   debug_report_classification();
 
   /**
+   * @brief Count stencil searches whose query lies far from its DoF or whose
+   * periodic stencil cell is not visible on this rank, and print the details
+   * of the first few such events.
+   *
+   * @param caller Name of the calling routine.
+   * @param particle_id Particle whose stencil is being built.
+   * @param dof Global DoF index.
+   * @param dof_point Support point of the DoF.
+   * @param query_point Point used to find the stencil cell.
+   * @param seed Cut cell the search started from.
+   */
+  void
+  debug_check_stencil_query(
+    const char                                           *caller,
+    const unsigned int                                    particle_id,
+    const types::global_dof_index                         dof,
+    const Point<dim>                                     &dof_point,
+    const Point<dim>                                     &query_point,
+    const typename DoFHandler<dim>::active_cell_iterator &seed);
+
+  /**
+   * @brief Print a one-line summary of unusual stencil searches since the
+   * previous call (collective; silent when nothing unusual happened).
+   */
+  void
+  debug_report_stencil_queries();
+
+  /// Counts since the last report: searches, far queries, periodic fallbacks.
+  std::array<unsigned int, 3> debug_stencil_counts_local{};
+  unsigned int                debug_stencil_events_printed   = 0;
+  bool                        debug_last_stencil_unavailable = false;
+  Point<dim>                  debug_last_stencil_wrapped;
+
+  /**
    * @brief Print every particle's position, velocity and angular velocity
    * after integration when SHARP_DEBUG_PARTICLE_TRACE is set.
    */
