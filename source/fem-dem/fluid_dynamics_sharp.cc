@@ -5921,8 +5921,8 @@ FluidDynamicsSharp<dim>::debug_check_stencil_query(
   const std::string verdict =
     !debug_last_stencil_unavailable ?
       "far_query_found_cell" :
-      (wrapped_to_dof_image_over_h < 0.5 ? "ghost_layer_gap_across_seam" :
-                                           "far_query_unavailable");
+      (offset_over_h < 0.5 ? "pushed_through_wall_and_seam_wall_fallback" :
+                             "far_query_outside_domain_wall_fallback");
 
   std::ostringstream event;
   event << std::scientific << std::setprecision(9)
@@ -5991,12 +5991,31 @@ FluidDynamicsSharp<dim>::find_periodic_stencil_cell(
   // SHARP-TEMPORARY-DEBUG-BOTTOM
   if (cell == this->dof_handler->end() && !(wrapped == point))
     {
-      // The point crossed the periodic seam and its wrapped image lies in a
-      // cell that this rank cannot see (neither owned nor ghost). Rather than
-      // abort, report "no stencil cell", exactly as for a point blocked by a
-      // wall: the caller then falls back to the cut cell itself and imposes
-      // the boundary value directly for this DoF. The shift must be reset,
-      // since no cell across the seam is used.
+      // For a DoF on a wall, the search point is pushed away from the
+      // particle, i.e. out through the wall, and no cell contains it. Without
+      // periodicity this is the expected "blocked by a wall" case and the
+      // caller falls back to the cut cell itself. On the edge where a wall
+      // (or the outlet) meets the periodic seam, the point is pushed through
+      // the wall and across the seam at the same time: wrapping corrects only
+      // the periodic direction, so the point is still outside the domain.
+      // Treat it as the same wall case. The shift is reset, since no cell
+      // across the seam is used.
+      const double tolerance =
+        1e-10 * (periodic_domain_upper - periodic_domain_lower);
+      bool outside_in_non_periodic_direction = false;
+      for (unsigned int d = 0; d < dim; ++d)
+        if (d != sharp_ib_periodic_boundaries.get_periodic_direction() &&
+            (wrapped[d] < domain_bounding_box_lower[d] - tolerance ||
+             wrapped[d] > domain_bounding_box_upper[d] + tolerance))
+          outside_in_non_periodic_direction = true;
+
+      // A wrapped point inside the domain must lie in a cell this rank can
+      // see: the ghost layer contains every cell around the periodic image of
+      // an owned vertex, and stencil points stay within a fraction of a cell
+      // of their DoF. Failing that would be a genuine bug, so keep the check.
+      AssertThrow(outside_in_non_periodic_direction,
+                  ExcMessage(
+                    "Periodic Sharp stencil is unavailable on this rank."));
       shift = Tensor<1, dim>();
       // SHARP-TEMPORARY-DEBUG-TOP
       debug_last_stencil_unavailable = true;
@@ -6044,6 +6063,33 @@ FluidDynamicsSharp<dim>::update_sharp_ib_periodic_geometry()
     Utilities::MPI::min(periodic_domain_lower, this->mpi_communicator);
   periodic_domain_upper =
     Utilities::MPI::max(periodic_domain_upper, this->mpi_communicator);
+
+  // Bounding box of the whole (box-like) domain, used to recognise stencil
+  // points pushed out through a wall.
+  for (unsigned int d = 0; d < dim; ++d)
+    {
+      domain_bounding_box_lower[d] = std::numeric_limits<double>::max();
+      domain_bounding_box_upper[d] = std::numeric_limits<double>::lowest();
+    }
+  for (const auto &cell : this->triangulation->active_cell_iterators())
+    if (!cell->is_artificial())
+      for (const auto v : cell->vertex_indices())
+        for (unsigned int d = 0; d < dim; ++d)
+          {
+            domain_bounding_box_lower[d] =
+              std::min(domain_bounding_box_lower[d], cell->vertex(v)[d]);
+            domain_bounding_box_upper[d] =
+              std::max(domain_bounding_box_upper[d], cell->vertex(v)[d]);
+          }
+  for (unsigned int d = 0; d < dim; ++d)
+    {
+      domain_bounding_box_lower[d] =
+        Utilities::MPI::min(domain_bounding_box_lower[d],
+                            this->mpi_communicator);
+      domain_bounding_box_upper[d] =
+        Utilities::MPI::max(domain_bounding_box_upper[d],
+                            this->mpi_communicator);
+    }
 
   const double length = periodic_domain_upper - periodic_domain_lower;
   AssertThrow(std::isfinite(length) && length > 0.,

@@ -1104,6 +1104,11 @@ private:
   // Cache for domain bounds in periodic direction (used for wrapping)
   double periodic_domain_lower = 0.;
   double periodic_domain_upper = 0.;
+
+  // Bounding box of the whole domain, used to recognise periodic stencil
+  // points pushed out through a wall.
+  Point<dim> domain_bounding_box_lower;
+  Point<dim> domain_bounding_box_upper;
 };
 
 
