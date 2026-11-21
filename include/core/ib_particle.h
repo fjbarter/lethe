@@ -436,6 +436,13 @@ public:
   Tensor<1, 3> contact_impulsion;
 
   /**
+   * @brief True if the particle overlapped a wall or another particle (i.e. a
+   * solid contact force acted on it) during the last DEM sub-time-stepping of
+   * the current time step. Lubrication alone does not set it.
+   */
+  bool solid_contact = false;
+
+  /**
    * @brief Last non-linear iteration's total impulsion on the particle.
    */
   Tensor<1, 3> impulsion_iter;

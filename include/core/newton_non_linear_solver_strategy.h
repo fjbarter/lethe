@@ -86,7 +86,14 @@ NewtonNonLinearSolverStrategy<VectorType>::solve()
       if (assemble_rhs_this_iteration)
         solver->assemble_system_rhs();
 
-      if (this->outer_iteration == 0)
+      // Take the reference residual of this iteration from the RHS just
+      // assembled at the current evaluation point. Without this, iterations
+      // after the first reuse the residual of the previous line search. That is
+      // the same value for most solvers, but not for solvers that change their
+      // state while assembling the matrix (e.g. Sharp-IB, which moves the
+      // particles there): the line search and the printed residual would then
+      // refer to a state that no longer exists.
+      if (assemble_rhs_this_iteration)
         {
           auto &system_rhs = solver->get_system_rhs();
           current_res      = system_rhs.l2_norm() / rescale_metric;

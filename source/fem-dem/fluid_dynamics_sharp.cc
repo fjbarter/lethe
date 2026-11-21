@@ -229,7 +229,11 @@ FluidDynamicsSharp<dim>::debug_trace_particles()
             << " newton=" << this->get_current_newton_iteration()
             << " particle=" << p << " position=" << particles[p].position
             << " velocity=" << particles[p].velocity
-            << " omega=" << particles[p].omega;
+            << " omega=" << particles[p].omega
+            << " velocity_residual=" << particles[p].previous_velocity_residual
+            << " fluid_force=" << particles[p].fluid_forces
+            << " contact_lubrication_impulse="
+            << particles[p].contact_impulsion;
       this->pcout << trace.str() << std::endl;
     }
 }
@@ -2710,6 +2714,25 @@ FluidDynamicsSharp<dim>::integrate_particles()
 
       bool clear_combined_shape_cache = false;
 
+      // SHARP-TEMP position path diagnostics / experiment. Path: 0 = BDF
+      // position from the relaxed velocity, 1 = DEM sub-step position.
+      static std::vector<int> debug_position_path_last;
+      static unsigned int     debug_position_path_step =
+        numbers::invalid_unsigned_int;
+      if (debug_position_path_step !=
+            this->simulation_control->get_iteration_number() ||
+          debug_position_path_last.size() != particles.size())
+        {
+          debug_position_path_last.assign(particles.size(), -1);
+          debug_position_path_step =
+            this->simulation_control->get_iteration_number();
+        }
+      const bool debug_position_path_on =
+        std::getenv("SHARP_DEBUG_POSITION_PATH") != nullptr;
+      unsigned int debug_n_path_switch = 0;
+      unsigned int debug_n_dem_path    = 0;
+      double       debug_max_dem_gap   = 0.;
+
       for (unsigned int p = 0; p < particles.size(); ++p)
         {
           if (particles[p].integrate_motion)
@@ -2742,6 +2765,7 @@ FluidDynamicsSharp<dim>::integrate_particles()
                 ib_dem.dem_particles[p].contact_impulsion;
               particles[p].omega_contact_impulsion =
                 ib_dem.dem_particles[p].omega_contact_impulsion;
+              particles[p].solid_contact = ib_dem.dem_particles[p].solid_contact;
               // Time stepping information
               const auto method =
                 this->simulation_control->get_assembly_method();
@@ -2843,12 +2867,72 @@ FluidDynamicsSharp<dim>::integrate_particles()
               particles[p].impulsion_iter             = particles[p].impulsion;
               particles[p].previous_velocity_residual = residual_velocity;
 
-              // If the particles have impacted a wall or another particle, we
-              // want to use the sub-time step position. Otherwise, we solve the
-              // new position directly with the new velocity found.
-              if (particles[p].contact_impulsion.norm() < 1e-12 and
-                  (this->simulation_parameters.particlesParameters
-                     ->explicit_position_integration_calculation == false))
+              // If the particle has impacted a wall or another particle, we
+              // want to use the sub-time step position, which resolves the
+              // stiff contact force. Otherwise, we solve the new position
+              // directly with the new (relaxed) velocity found.
+              //
+              // Lubrication alone must not select the sub-time step position:
+              // that position is recomputed from the current fluid force at
+              // every non-linear iteration without any relaxation, which closes
+              // an unrelaxed fixed-point loop force -> position -> force. Its
+              // gain is about dt^2/(2m) * dF/dx and can reach -1 for small
+              // particles, leading to a position oscillation that never decays
+              // and that the velocity secant misreads as a velocity error. The
+              // lubrication impulse still enters the velocity residual, and so
+              // the position, through contact_impulsion.
+              // SHARP-TEMP position path diagnostics.
+              Point<dim> debug_bdf_position;
+              for (int d = 0; d < dim; ++d)
+                {
+                  for (unsigned int i = 1;
+                       i < number_of_previous_solutions(method) + 1;
+                       ++i)
+                    debug_bdf_position[d] +=
+                      -bdf_coefs[i] *
+                      particles[p].previous_positions[i - 1][d] / bdf_coefs[0];
+                  debug_bdf_position[d] +=
+                    particles[p].velocity[d] / bdf_coefs[0];
+                }
+              const double debug_impulse_norm =
+                particles[p].contact_impulsion.norm();
+              const bool use_bdf_position =
+                !particles[p].solid_contact and
+                (this->simulation_parameters.particlesParameters
+                   ->explicit_position_integration_calculation == false);
+              const int path_now = use_bdf_position ? 0 : 1;
+              if (debug_position_path_on)
+                {
+                  const double gap_bdf_dem =
+                    debug_bdf_position.distance(
+                      ib_dem.dem_particles[p].position);
+                  if (debug_position_path_last[p] >= 0 &&
+                      debug_position_path_last[p] != path_now)
+                    {
+                      ++debug_n_path_switch;
+                      std::ostringstream line;
+                      line << std::scientific << std::setprecision(4)
+                           << "[SHARP-TEMP] position_path_switch step="
+                           << this->simulation_control->get_iteration_number()
+                           << " newton=" << this->get_current_newton_iteration()
+                           << " particle=" << p << " to="
+                           << (path_now ? "DEM" : "BDF")
+                           << " impulse=" << debug_impulse_norm
+                           << " bdf_dem_distance_over_h="
+                           << gap_bdf_dem / (dr * std::numbers::sqrt2 /
+                                             std::sqrt(double(dim)));
+                      this->pcout << line.str() << std::endl;
+                    }
+                  if (path_now == 1)
+                    {
+                      ++debug_n_dem_path;
+                      debug_max_dem_gap =
+                        std::max(debug_max_dem_gap, gap_bdf_dem);
+                    }
+                }
+              debug_position_path_last[p] = path_now;
+
+              if (use_bdf_position)
                 {
                   particles[p].position.clear();
                   for (int d = 0; d < dim; ++d)
@@ -3103,6 +3187,21 @@ FluidDynamicsSharp<dim>::integrate_particles()
 
       if (clear_combined_shape_cache)
         combined_shapes->clear_cache();
+
+      if (debug_position_path_on)
+        {
+          std::ostringstream line;
+          line << std::scientific << std::setprecision(4)
+               << "[SHARP-TEMP] position_path step="
+               << this->simulation_control->get_iteration_number()
+               << " newton=" << this->get_current_newton_iteration()
+               << " dem_path=" << debug_n_dem_path
+               << " switches=" << debug_n_path_switch
+               << " max_dem_bdf_distance_over_h="
+               << debug_max_dem_gap /
+                    (dr * std::numbers::sqrt2 / std::sqrt(double(dim)));
+          this->pcout << line.str() << std::endl;
+        }
 
       if (this->simulation_parameters.physics_solving_strategy
             .at(PhysicsID::fluid_dynamics)

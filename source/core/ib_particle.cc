@@ -62,6 +62,7 @@ IBParticle<dim>::initialize_all()
   impulsion            = 0.;
   impulsion_iter       = 0.;
   contact_impulsion    = 0.;
+  solid_contact        = false;
 
   previous_positions.resize(3);
   previous_velocity.resize(3);

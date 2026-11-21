@@ -1432,6 +1432,7 @@ IBParticlesDEM<dim>::integrate_particles_motion(const double dt,
       dem_particles[p_i].omega_impulsion         = 0;
       dem_particles[p_i].contact_impulsion       = 0;
       dem_particles[p_i].omega_contact_impulsion = 0;
+      dem_particles[p_i].solid_contact           = false;
       // Initialized the gravity at the particle position.
       g[p_i][0] =
         this->parameters->f_gravity->value(dem_particles[p_i].position, 0);
@@ -1577,6 +1578,14 @@ IBParticlesDEM<dim>::integrate_particles_motion(const double dt,
                   k_contact_impulsion[p_i][step] =
                     contact_wall_force[p_i] + contact_force[p_i] +
                     lubrication_force[p_i] + lubrication_wall_force[p_i];
+
+                  // The contact models only add a force when the particles
+                  // overlap, so any contribution flags a solid contact.
+                  if (contact_force[p_i].norm_square() > 0. ||
+                      contact_wall_force[p_i].norm_square() > 0. ||
+                      contact_torque[p_i].norm_square() > 0. ||
+                      contact_wall_torque[p_i].norm_square() > 0.)
+                    dem_particles[p_i].solid_contact = true;
 
                   dem_particles[p_i].velocity =
                     last_velocity[p_i] + k_velocity[p_i][step] * next_stage_dt;
